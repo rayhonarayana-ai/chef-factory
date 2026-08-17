@@ -1,0 +1,37 @@
+{
+  "name": "chef-factory",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CHEF Personal Executive Core — Gate 1 (independent AI Company Factory)",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:unit": "vitest run src/core src/gateways",
+    "test:integration": "vitest run src/integration",
+    "start": "node dist/api/server.js",
+    "dev": "tsx src/api/server.ts",
+    "seed": "tsx src/db/seed.ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "bcryptjs": "^2.4.3",
+    "pg": "^8.11.5"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0",
+    "vitest": "^1.6.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "esbuild@0.21.5": true
+  }
+}

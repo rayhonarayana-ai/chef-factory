@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>CHEF Factory — Control Plane</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">CHEF&nbsp;Factory</span>
+    <nav id="nav" class="hidden">
+      <a href="#/chat">Chat</a>
+      <a href="#/projects">Projects</a>
+      <a href="#/passport">Passport</a>
+      <a href="#/agents">Agents</a>
+      <a href="#/tasks">Tasks</a>
+      <a href="#/approvals">Approvals</a>
+      <a href="#/costs">Costs</a>
+      <a href="#/audit">Audit</a>
+      <a href="#/status">Status</a>
+    </nav>
+    <button id="logout" class="hidden">Sign out</button>
+  </header>
+
+  <main id="app">
+    <section id="screen-login" class="screen">
+      <div class="card login-card">
+        <h1>CHEF Factory Control Plane</h1>
+        <p class="muted">Sign in with your Factory owner account.</p>
+        <label>Email <input id="login-email" type="email" autocomplete="username" /></label>
+        <label>Password <input id="login-password" type="password" autocomplete="current-password" /></label>
+        <button id="login-btn">Sign in</button>
+        <p id="login-msg" class="error hidden"></p>
+        <p class="hint">If no owner account exists, run: <code>npm run seed</code> (set FACTORY_OWNER_EMAIL/PASSWORD in .env first).</p>
+      </div>
+    </section>
+
+    <section id="screen-chat" class="screen hidden">
+      <div class="card">
+        <h2>CHEF Chat</h2>
+        <p class="muted">Speak to CHEF in plain commands. Example: <code>status</code>, <code>list projects</code>, <code>delete resource in chef-hq production</code>.</p>
+        <div class="chat-input">
+          <textarea id="chat-input" rows="2" placeholder="Command…"></textarea>
+          <button id="chat-send">Send</button>
+        </div>
+        <div id="chat-output"></div>
+      </div>
+    </section>
+
+    <section id="screen-projects" class="screen hidden">
+      <div class="card">
+        <h2>Projects</h2>
+        <div class="form-row">
+          <input id="project-name" placeholder="Name" />
+          <input id="project-slug" placeholder="slug" />
+          <input id="project-desc" placeholder="Description" />
+          <button id="project-create">Create</button>
+        </div>
+        <div id="project-list" class="list"></div>
+      </div>
+    </section>
+
+    <section id="screen-passport" class="screen hidden">
+      <div class="card">
+        <h2>Project Passport</h2>
+        <label>Project <select id="passport-project"></select></label>
+        <div id="passport-form"></div>
+        <button id="passport-save">Save passport</button>
+        <div id="passport-summary" class="summary"></div>
+      </div>
+    </section>
+
+    <section id="screen-agents" class="screen hidden">
+      <div class="card"><h2>Agents</h2><div id="agent-list" class="list"></div></div>
+    </section>
+
+    <section id="screen-tasks" class="screen hidden">
+      <div class="card">
+        <h2>Tasks</h2>
+        <div class="form-row">
+          <select id="task-project"><option value="">All projects</option></select>
+          <select id="task-status">
+            <option value="">All statuses</option>
+            <option>created</option><option>queued</option><option>running</option>
+            <option>completed</option><option>failed</option><option>cancelled</option>
+            <option>paused</option><option>needs_approval</option>
+          </select>
+          <button id="task-refresh">Refresh</button>
+        </div>
+        <div id="task-list" class="list"></div>
+      </div>
+    </section>
+
+    <section id="screen-approvals" class="screen hidden">
+      <div class="card">
+        <h2>Approvals</h2>
+        <div id="approval-list" class="list"></div>
+      </div>
+    </section>
+
+    <section id="screen-costs" class="screen hidden">
+      <div class="card"><h2>Costs</h2><div id="cost-list" class="list"></div></div>
+    </section>
+
+    <section id="screen-audit" class="screen hidden">
+      <div class="card">
+        <h2>Audit</h2>
+        <div class="form-row">
+          <input id="audit-limit" type="number" value="50" min="1" max="200" />
+          <button id="audit-refresh">Refresh</button>
+        </div>
+        <div id="audit-list" class="list"></div>
+      </div>
+    </section>
+
+    <section id="screen-status" class="screen hidden">
+      <div class="card"><h2>Daily Status</h2><div id="status-view"></div></div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
