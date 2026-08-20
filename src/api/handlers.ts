@@ -6,7 +6,7 @@
 import type { IncomingMessage } from 'node:http';
 import type { Store } from '../core/ports.js';
 import { CommandPipeline, type ActorContext } from '../core/pipeline.js';
-import { resolveApproval, validateNewApproval } from '../core/approval.js';
+import { resolveApproval, validateNewApproval, isExpired } from '../core/approval.js';
 import { transitionTask } from '../core/taskEngine.js';
 import { validatePreference } from '../core/pos.js';
 import { passportSummary } from '../core/passport.js';
@@ -30,14 +30,16 @@ export interface ApiRequest {
 export type HandlerResult = { status: number; json: unknown };
 
 export class Api {
-  private readonly conversations = new ConversationService();
+  private readonly conversations: ConversationService;
 
   constructor(
     private readonly store: Store,
     private readonly auth: AuthService,
     private readonly pipeline: CommandPipeline,
     private readonly execution: ExecutionRunner,
-  ) {}
+  ) {
+    this.conversations = new ConversationService(store);
+  }
 
   async handle(req: ApiRequest): Promise<HandlerResult> {
     const { method, path, params, owner } = req;
@@ -87,6 +89,20 @@ export class Api {
 
         // Run pipeline with conversation history
         const result = await this.pipeline.run(actorCtx(), command, conversationHistory);
+
+        // Gate 19 (OD32): Append tool results to conversation
+        if (result.toolMessages && result.toolMessages.length > 0) {
+          for (const tm of result.toolMessages) {
+            await this.conversations.appendMessage({
+              conversationId: convId,
+              ownerId: owner.id,
+              role: 'tool',
+              content: tm.content,
+              toolCallId: tm.tool_call_id,
+              name: tm.name,
+            });
+          }
+        }
 
         // Append assistant response
         const responseText = typeof result.explanation?.decision === 'string' ? result.explanation.decision : JSON.stringify(result);
@@ -190,6 +206,13 @@ export class Api {
         }
         const approval = await this.store.getApproval(owner.id, approvalId);
         if (!approval) return { status: 404, json: { error: 'approval not found' } };
+        if (isExpired(approval)) {
+          await this.store.patchApproval(owner.id, approvalId, {
+            status: 'expired',
+            decidedAt: new Date().toISOString(),
+          });
+          return { status: 409, json: { error: 'approval has expired' } };
+        }
         const { approval: resolved, error } = resolveApproval({
           approval,
           status: decision as 'approved' | 'rejected' | 'denied',
@@ -366,16 +389,9 @@ export class Api {
   }
 
   private async queryAudit(ownerId: string, json: Record<string, unknown>) {
-    void ownerId;
-    // Audit read via owner-scoped store query (append-only; selection only).
     const limit = typeof json.limit === 'number' ? Math.min(200, Math.max(1, json.limit)) : 50;
-    const conn = await import('../db/pool.js').then((m) => m.getPool());
-    const res = await conn.query(
-      `select * from public.audit_events where project_id in (select id from public.projects where owner_id = $1)
-       order by id desc limit $2`,
-      [ownerId, limit],
-    );
-    return res.rows.map((r) => redactForLog(JSON.parse(JSON.stringify(r))));
+    const rows = await this.store.queryAudit(ownerId, { limit });
+    return rows.map((r) => redactForLog(JSON.parse(JSON.stringify(r))));
   }
 
   private ok(json: unknown): HandlerResult {

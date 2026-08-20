@@ -173,6 +173,9 @@ export class SupabaseStore implements Store {
     const sets: string[] = [];
     const params: unknown[] = [ownerId, taskId];
     const field: Record<keyof import('../core/ports.js').TaskPatch, string> = {
+      title: 'title',
+      description: 'description',
+      priority: 'priority',
       status: 'status',
       output: 'output',
       error: 'error',
@@ -725,5 +728,154 @@ export class SupabaseStore implements Store {
 
   private toSnake(s: string): string {
     return s.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+  }
+
+  // ————— Gate 3 — Conversation persistence —————
+
+  async createConversation(ownerId: string, data: { projectId?: string | null; title?: string | null }): Promise<import('../core/conversation.js').ConversationRecord> {
+    const res = await this.q<{ id: string; owner_id: string; project_id: string | null; title: string | null; status: string; created_at: string; updated_at: string }>(
+      `INSERT INTO public.conversations (owner_id, project_id, title)
+       VALUES ($1, $2, $3)
+       RETURNING id, owner_id, project_id, title, status, created_at, updated_at`,
+      [ownerId, data.projectId ?? null, data.title ?? null],
+    );
+    const row = res[0]!;
+    return {
+      id: row.id,
+      ownerId: row.owner_id,
+      projectId: row.project_id,
+      title: row.title,
+      status: row.status as 'active' | 'archived',
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async getConversation(ownerId: string, conversationId: string): Promise<import('../core/conversation.js').ConversationRecord | null> {
+    const res = await this.q<{ id: string; owner_id: string; project_id: string | null; title: string | null; status: string; created_at: string; updated_at: string }>(
+      `SELECT id, owner_id, project_id, title, status, created_at, updated_at
+       FROM public.conversations
+       WHERE id = $1 AND owner_id = $2`,
+      [conversationId, ownerId],
+    );
+    if (res.length === 0) return null;
+    const row = res[0]!;
+    return {
+      id: row.id,
+      ownerId: row.owner_id,
+      projectId: row.project_id,
+      title: row.title,
+      status: row.status as 'active' | 'archived',
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async listConversations(ownerId: string, filter?: { status?: string; limit?: number; offset?: number }): Promise<import('../core/conversation.js').ConversationRecord[]> {
+    const limit = filter?.limit ?? 50;
+    const offset = filter?.offset ?? 0;
+    const statusFilter = filter?.status ?? 'active';
+    const res = await this.q<{ id: string; owner_id: string; project_id: string | null; title: string | null; status: string; created_at: string; updated_at: string }>(
+      `SELECT id, owner_id, project_id, title, status, created_at, updated_at
+       FROM public.conversations
+       WHERE owner_id = $1 AND status = $2
+       ORDER BY created_at DESC
+       LIMIT $3 OFFSET $4`,
+      [ownerId, statusFilter, limit, offset],
+    );
+    return res.map((row) => ({
+      id: row.id,
+      ownerId: row.owner_id,
+      projectId: row.project_id,
+      title: row.title,
+      status: row.status as 'active' | 'archived',
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  async archiveConversation(ownerId: string, conversationId: string): Promise<boolean> {
+    const res = await this.pool.query(
+      `UPDATE public.conversations SET status = 'archived'
+       WHERE id = $1 AND owner_id = $2`,
+      [conversationId, ownerId],
+    );
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  async appendMessage(ownerId: string, input: { conversationId: string; role: string; content: string; toolCalls?: unknown; toolCallId?: string | null; name?: string | null; tokenCount?: number | null }): Promise<import('../core/conversation.js').ConversationMessage> {
+    const res = await this.q<{ id: string; conversation_id: string; owner_id: string; role: string; content: string; tool_calls: unknown; tool_call_id: string | null; name: string | null; token_count: number | null; created_at: string }>(
+      `INSERT INTO public.conversation_messages
+       (conversation_id, owner_id, role, content, tool_calls, tool_call_id, name, token_count)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, conversation_id, owner_id, role, content, tool_calls, tool_call_id, name, token_count, created_at`,
+      [
+        input.conversationId,
+        ownerId,
+        input.role,
+        input.content,
+        input.toolCalls ? JSON.stringify(input.toolCalls) : null,
+        input.toolCallId ?? null,
+        input.name ?? null,
+        input.tokenCount ?? null,
+      ],
+    );
+    const row = res[0]!;
+    return {
+      id: row.id,
+      conversationId: row.conversation_id,
+      ownerId: row.owner_id,
+      role: row.role as 'user' | 'assistant' | 'tool' | 'system',
+      content: row.content,
+      toolCalls: row.tool_calls,
+      toolCallId: row.tool_call_id,
+      name: row.name,
+      tokenCount: row.token_count,
+      createdAt: row.created_at,
+    };
+  }
+
+  async loadHistory(ownerId: string, conversationId: string, limit: number = 20): Promise<import('../core/conversation.js').ConversationMessage[]> {
+    const res = await this.q<{ id: string; conversation_id: string; owner_id: string; role: string; content: string; tool_calls: unknown; tool_call_id: string | null; name: string | null; token_count: number | null; created_at: string }>(
+      `SELECT id, conversation_id, owner_id, role, content, tool_calls, tool_call_id, name, token_count, created_at
+       FROM public.conversation_messages
+       WHERE conversation_id = $1 AND owner_id = $2
+       ORDER BY created_at ASC`,
+      [conversationId, ownerId],
+    );
+    const all = res.map((row) => ({
+      id: row.id,
+      conversationId: row.conversation_id,
+      ownerId: row.owner_id,
+      role: row.role as 'user' | 'assistant' | 'tool' | 'system',
+      content: row.content,
+      toolCalls: row.tool_calls,
+      toolCallId: row.tool_call_id,
+      name: row.name,
+      tokenCount: row.token_count,
+      createdAt: row.created_at,
+    }));
+    return all.slice(-limit);
+  }
+
+  // ————— Gate 19 — Audit query —————
+  async queryAudit(ownerId: string, filter?: { limit?: number }): Promise<Record<string, unknown>[]> {
+    const limit = filter?.limit ?? 50;
+    const res = await this.pool.query(
+      `SELECT * FROM public.audit_events WHERE project_id IN (SELECT id FROM public.projects WHERE owner_id = $1)
+       ORDER BY id DESC LIMIT $2`,
+      [ownerId, limit],
+    );
+    return res.rows;
+  }
+
+  // ————— Gate 21 — Stale RUNNING task recovery —————
+  async recoverStaleRunningTasks(staleBefore: Date): Promise<number> {
+    const res = await this.pool.query(
+      `UPDATE public.tasks SET status = 'failed', error = $1, completed_at = now(), updated_at = now()
+       WHERE status = 'running' AND started_at < $2`,
+      [{ message: 'Process restarted while task was running. Stale RUNNING task recovered to FAILED.' }, staleBefore.toISOString()],
+    );
+    return res.rowCount ?? 0;
   }
 }

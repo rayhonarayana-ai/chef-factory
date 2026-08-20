@@ -24,6 +24,10 @@ import type { AnomalyDetector } from '../core/security/anomaly.js';
 
 export const FACTORY_MAX_TOOL_ROUNDS = 10;
 
+// ─── Gate 22: Execution Timeout ──────────────────────────────────────
+/** Default single-step execution timeout (60 seconds). */
+export const EXECUTION_TIMEOUT_MS = 60_000;
+
 // ─── Gate 11: Conversation Token Budget ─────────────────────────────
 /** Default conversation token budget. Rough estimate: 1 token ≈ 4 chars. */
 export const CONVERSATION_TOKEN_BUDGET = 8000;
@@ -112,6 +116,118 @@ export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRu
   const secrets = opts.secretProvider ?? createEnvSecretProvider();
   const toolDefs = GATE3_TOOLS;
 
+  // Gate 22: inner execution logic with AbortSignal propagation.
+  async function executeInner(
+    task: TaskRecord,
+    ctx: ActorContext,
+    intent: ParsedIntent,
+    conversationHistory?: ConversationMessage[],
+    signal?: AbortSignal,
+  ): Promise<ExecutionOutcome> {
+    // Informational commands → deterministic evidence-based answer.
+    if (INFO_VERBS.has(intent.verb)) {
+      return runInformational(opts.store, ctx.ownerId, intent);
+    }
+
+    // Execute-class: try ModelGateway first, then RuntimeGateway.
+    const models = await opts.store.listModels(ctx.ownerId);
+    const neededReasoning = computeNeededReasoning(intent);
+    const selection = opts.modelGateway.select(models, {
+      requirement: intent.resource ?? 'general',
+      neededReasoning,
+      neededTools: true,
+      minContextWindow: null,
+    });
+
+    if (selection.model) {
+      const adapter: ProviderAdapter | null = opts.modelGateway.adapterFor(selection.model.provider);
+      if (adapter && adapter.configured()) {
+        try {
+          // Gate 3: tool calling loop
+          if (adapter.supportsTools()) {
+            return await runToolLoop(adapter, selection.model, toolDefs, task, ctx, intent, secrets, opts.toolDb, conversationHistory, opts.securityGuardian, opts.rateLimiter, opts.anomalyDetector, opts.store, signal);
+          }
+          // G5-02: Fallback: text-only — must still pass through rate limit check
+          if (opts.rateLimiter) {
+            const modelLimit = opts.rateLimiter.check(ctx.ownerId, 'model' as SecurityScopeKey, 'model.call');
+            if (!modelLimit.allowed) {
+              return {
+                ok: false,
+                error: `Rate limit exceeded: model.call (${modelLimit.limit} per ${Math.round(modelLimit.windowMs / 1000)}s). Retry later.`,
+                reason: 'rate-limit-exceeded',
+              };
+            }
+          }
+          const historyText = conversationHistory && conversationHistory.length > 0
+            ? truncateConversationHistory(conversationHistory).map((m) => `[${m.role}]: ${m.content}`).join('\n') + '\n'
+            : '';
+          const response = await adapter.complete({
+            model: selection.model.name,
+            system: systemPrompt(ctx),
+            messages: [
+              ...(historyText ? [{ role: 'user' as const, content: historyText }] : []),
+              { role: 'user', content: `Task: ${task.title}\nCommand context: ${intent.normalized}` },
+            ],
+            maxTokens: 1024,
+            temperature: 0,
+            signal,
+          });
+          const inputTokens = response.usage?.inputTokens ?? estimateTokens(systemPrompt(ctx) + task.title);
+          const outputTokens = response.usage?.outputTokens ?? estimateTokens(response.text);
+          const cost = costForTokens(
+            selection.model.costPer1kInput,
+            selection.model.costPer1kOutput,
+            inputTokens,
+            outputTokens,
+          );
+          return {
+            ok: true,
+            output: { text: response.text, model: `${selection.model.provider}/${selection.model.name}`, usage: response.usage },
+            modelId: selection.model.id,
+            cost,
+          };
+        } catch (e) {
+          // Gate 22: re-throw abort errors so outer execute() can detect timeout.
+          if (e instanceof DOMException && e.name === 'AbortError' && signal?.aborted) {
+            throw e;
+          }
+          return { ok: false, error: String(e), reason: 'model-call-failed' };
+        }
+      }
+    }
+
+    // Runtime path.
+    const runtimes = await opts.store.listRuntimes(ctx.ownerId);
+    const runtimeSel = opts.runtimeGateway.select(runtimes, intent.resource ?? 'general');
+    if (runtimeSel.runtime) {
+      const adapter = opts.runtimeGateway.adapterFor(runtimeSel.runtime.slug);
+      if (adapter?.available()) {
+        const result = await adapter.execute({
+          runtime: runtimeSel.runtime,
+          command: task.title,
+          projectPath: null,
+          environment: intent.environment ?? 'development',
+          signal,
+        });
+        return {
+          ok: result.ok,
+          output: result.output || null,
+          error: result.error ?? undefined,
+          runtimeId: runtimeSel.runtime.id,
+          cost: result.estimatedCost,
+          reason: result.ok ? undefined : 'runtime-failed',
+        };
+      }
+    }
+
+    return {
+      ok: false,
+      error:
+        'No configured model provider or runtime adapter is available for execution. Nothing was invented and no credits were spent.',
+      reason: 'no-executor',
+    };
+  }
+
   return {
     async execute(
       task: TaskRecord,
@@ -119,102 +235,19 @@ export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRu
       intent: ParsedIntent,
       conversationHistory?: ConversationMessage[],
     ): Promise<ExecutionOutcome> {
-      // Informational commands → deterministic evidence-based answer.
-      if (INFO_VERBS.has(intent.verb)) {
-        return runInformational(opts.store, ctx.ownerId, intent);
-      }
-
-      // Execute-class: try ModelGateway first, then RuntimeGateway.
-      const models = await opts.store.listModels(ctx.ownerId);
-      const neededReasoning = computeNeededReasoning(intent);
-      const selection = opts.modelGateway.select(models, {
-        requirement: intent.resource ?? 'general',
-        neededReasoning,
-        neededTools: true,
-        minContextWindow: null,
-      });
-
-      if (selection.model) {
-        const adapter: ProviderAdapter | null = opts.modelGateway.adapterFor(selection.model.provider);
-        if (adapter && adapter.configured()) {
-          try {
-            // Gate 3: tool calling loop
-            if (adapter.supportsTools()) {
-              return await runToolLoop(adapter, selection.model, toolDefs, task, ctx, intent, secrets, opts.toolDb, conversationHistory, opts.securityGuardian, opts.rateLimiter, opts.anomalyDetector);
-            }
-            // G5-02: Fallback: text-only — must still pass through rate limit check
-            if (opts.rateLimiter) {
-              const modelLimit = opts.rateLimiter.check(ctx.ownerId, 'model' as SecurityScopeKey, 'model.call');
-              if (!modelLimit.allowed) {
-                return {
-                  ok: false,
-                  error: `Rate limit exceeded: model.call (${modelLimit.limit} per ${Math.round(modelLimit.windowMs / 1000)}s). Retry later.`,
-                  reason: 'rate-limit-exceeded',
-                };
-              }
-            }
-            const historyText = conversationHistory && conversationHistory.length > 0
-              ? truncateConversationHistory(conversationHistory).map((m) => `[${m.role}]: ${m.content}`).join('\n') + '\n'
-              : '';
-            const response = await adapter.complete({
-              model: selection.model.name,
-              system: systemPrompt(ctx),
-              messages: [
-                ...(historyText ? [{ role: 'user' as const, content: historyText }] : []),
-                { role: 'user', content: `Task: ${task.title}\nCommand context: ${intent.normalized}` },
-              ],
-              maxTokens: 1024,
-              temperature: 0,
-            });
-            const inputTokens = response.usage?.inputTokens ?? estimateTokens(systemPrompt(ctx) + task.title);
-            const outputTokens = response.usage?.outputTokens ?? estimateTokens(response.text);
-            const cost = costForTokens(
-              selection.model.costPer1kInput,
-              selection.model.costPer1kOutput,
-              inputTokens,
-              outputTokens,
-            );
-            return {
-              ok: true,
-              output: { text: response.text, model: `${selection.model.provider}/${selection.model.name}`, usage: response.usage },
-              modelId: selection.model.id,
-              cost,
-            };
-          } catch (e) {
-            return { ok: false, error: String(e), reason: 'model-call-failed' };
-          }
+      // Gate 22: create AbortController with configurable timeout.
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), EXECUTION_TIMEOUT_MS);
+      try {
+        return await executeInner(task, ctx, intent, conversationHistory, ac.signal);
+      } catch (e) {
+        if (ac.signal.aborted) {
+          return { ok: false, error: `Execution timed out after ${EXECUTION_TIMEOUT_MS}ms`, reason: 'execution-timeout' };
         }
+        return { ok: false, error: String(e), reason: 'execution-threw' };
+      } finally {
+        clearTimeout(timer);
       }
-
-      // Runtime path.
-      const runtimes = await opts.store.listRuntimes(ctx.ownerId);
-      const runtimeSel = opts.runtimeGateway.select(runtimes, intent.resource ?? 'general');
-      if (runtimeSel.runtime) {
-        const adapter = opts.runtimeGateway.adapterFor(runtimeSel.runtime.slug);
-        if (adapter?.available()) {
-          const result = await adapter.execute({
-            runtime: runtimeSel.runtime,
-            command: task.title,
-            projectPath: null,
-            environment: intent.environment ?? 'development',
-          });
-          return {
-            ok: result.ok,
-            output: result.output || null,
-            error: result.error ?? undefined,
-            runtimeId: runtimeSel.runtime.id,
-            cost: result.estimatedCost,
-            reason: result.ok ? undefined : 'runtime-failed',
-          };
-        }
-      }
-
-      return {
-        ok: false,
-        error:
-          'No configured model provider or runtime adapter is available for execution. Nothing was invented and no credits were spent.',
-        reason: 'no-executor',
-      };
     },
 
     // Gate 9: Propose orchestration plan steps via LLM (no execution — just planning)
@@ -364,6 +397,8 @@ async function runToolLoop(
   securityGuardian?: SecurityGuardian,
   rateLimiter?: RateLimiter,
   anomalyDetector?: AnomalyDetector,
+  store?: Store,
+  signal?: AbortSignal,
 ): Promise<ExecutionOutcome> {
   const system = systemPrompt(ctx);
 
@@ -412,7 +447,7 @@ async function runToolLoop(
       action: toolDef.actionType,
       minRisk: toolDef.riskLevel,
       run: async (args: Record<string, unknown>) => {
-        return toolDef.handler({ ownerId: ctx.ownerId, args, db });
+        return toolDef.handler({ ownerId: ctx.ownerId, args, db, store });
       },
     };
     broker.register(tool);
@@ -436,7 +471,7 @@ async function runToolLoop(
           actionType,
           permission: permission as import('../core/types.js').Permission,
           risk: request.risk as import('../core/types.js').RiskLevel,
-          authorized: true,
+          authorized: true, // actorType is always 'owner' here — owner is authorized on own projects
           explicitDeny: false,
           authorityOutcome: 'auto',
           scope: 'tool',
@@ -467,6 +502,7 @@ async function runToolLoop(
       maxTokens: 1024,
       temperature: 0,
       tools: providerTools,
+      signal,
     });
 
     totalInputTokens += response.usage?.inputTokens ?? 0;
@@ -564,7 +600,7 @@ async function runToolLoop(
         // G5-01: Tool validated by ToolBroker — now execute handler exactly once.
         consecutiveFailures = 0; // reset on success
         try {
-          const handlerResult = await toolDef.handler({ ownerId: ctx.ownerId, args: tc.arguments, db });
+          const handlerResult = await toolDef.handler({ ownerId: ctx.ownerId, args: tc.arguments, db, store });
           messages.push({
             role: 'tool',
             content: JSON.stringify(handlerResult),
@@ -595,6 +631,12 @@ async function runToolLoop(
     output: { text: lastText, model: `${model.provider}/${model.name}`, usage: { inputTokens, outputTokens }, toolRounds: round },
     modelId: model.id,
     cost,
+    toolMessages: messages.filter((m) => m.role === 'tool').map((m) => ({
+      role: 'tool' as const,
+      content: m.content,
+      tool_call_id: m.tool_call_id ?? '',
+      name: m.name ?? '',
+    })),
   };
 }
 

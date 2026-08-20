@@ -24,6 +24,9 @@ export interface GuardianDeps {
   anomaly: AnomalyDetector;
   recordEvent: (event: SecurityEventInput) => void | Promise<void>;
   costCheck?: CostCheck;
+  // Gate 16: optional persistent methods — when present, Guardian uses DB-backed state
+  checkPersisted?: (ownerId: string, scope: string, limitKey: string) => Promise<{ allowed: boolean; remaining: number; retryAfterMs: number | null; limit: number; windowMs: number }>;
+  notePersisted?: (ownerId: string, kind: string) => Promise<{ triggered: boolean; indicator: string; metric: number; threshold: number; reason: string } | null>;
 }
 
 export class SecurityGuardian {
@@ -94,7 +97,10 @@ export class SecurityGuardian {
     let rateLimited: { limited: boolean; scope: string | null; reason: string | null } = { limited: false, scope: null, reason: null };
     if (req.scope) {
       const limitKey = this.limitKeyFor(req);
-      const decision = this.deps.rateLimiter.check(req.ownerId, req.scope, limitKey);
+      // Gate 16: use persistent check when available (loads from DB)
+      const decision = this.deps.checkPersisted
+        ? await this.deps.checkPersisted(req.ownerId, req.scope, limitKey)
+        : this.deps.rateLimiter.check(req.ownerId, req.scope, limitKey);
       if (!decision.allowed) {
         rateLimited = { limited: true, scope: `${req.scope}:${limitKey}`, reason: `limit ${decision.limit} reached; retry in ${Math.ceil((decision.retryAfterMs ?? 0) / 1000)}s` };
         emit({ ...base, eventType: 'denied.rate_limit', severity: 'high', action: req.actionType, resource: req.resourceId ?? null, decision: 'deny', reason: rateLimited.reason ?? 'rate limit exceeded' });
@@ -140,7 +146,7 @@ export class SecurityGuardian {
     const finalAutonomy = guardianCombineAuthority(req.authorityOutcome ?? 'notify', securityDecision);
 
     // 10. Anomaly notes + events.
-    this.noteAnomalies(req, policy.decision, envIsolation.escalated, crossProject.crossed, rateLimited.limited, costStopped.stopped, emit, base);
+    await this.noteAnomalies(req, policy.decision, envIsolation.escalated, crossProject.crossed, rateLimited.limited, costStopped.stopped, emit, base);
 
     // 11. Record final deny/approval events.
     if (policy.decision === 'deny' && !criticalMatch) {
@@ -174,7 +180,7 @@ export class SecurityGuardian {
     return map[req.scope ?? ''] ?? `${req.scope}.${req.actionType}`;
   }
 
-  private noteAnomalies(
+  private async noteAnomalies(
     req: SecurityRequest,
     decision: SecurityDecision,
     envEscalated: boolean,
@@ -183,25 +189,36 @@ export class SecurityGuardian {
     costStopped: boolean,
     emit: (e: SecurityEventInput) => void,
     base: Omit<SecurityEventInput, 'eventType' | 'action' | 'reason' | 'decision' | 'severity'>,
-  ): void {
+  ): Promise<void> {
     if (decision === 'deny' || decision === 'lockdown') {
-      const signal = this.deps.anomaly.note('deniedActions');
+      // Gate 16: use persistent note when available (loads/saves from DB)
+      const signal = this.deps.notePersisted
+        ? await this.deps.notePersisted(req.ownerId, 'deniedActions')
+        : this.deps.anomaly.note('deniedActions');
       if (signal) emit({ ...base, eventType: 'anomaly.repeated_denial', severity: 'medium', action: req.actionType, resource: req.resourceId ?? null, decision, reason: signal.reason, metadata: { indicator: signal.indicator, metric: signal.metric, threshold: signal.threshold } });
     }
     if (envEscalated) {
-      const signal = this.deps.anomaly.note('environmentEscalations');
+      const signal = this.deps.notePersisted
+        ? await this.deps.notePersisted(req.ownerId, 'environmentEscalations')
+        : this.deps.anomaly.note('environmentEscalations');
       if (signal) emit({ ...base, eventType: 'anomaly.environment_escalation', severity: 'medium', action: req.actionType, resource: req.resourceId ?? null, decision: 'deny', reason: signal.reason });
     }
     if (crossProject) {
-      const signal = this.deps.anomaly.note('projectSwitches');
+      const signal = this.deps.notePersisted
+        ? await this.deps.notePersisted(req.ownerId, 'projectSwitches')
+        : this.deps.anomaly.note('projectSwitches');
       if (signal) emit({ ...base, eventType: 'anomaly.project_switching', severity: 'medium', action: req.actionType, resource: req.resourceId ?? null, decision: 'deny', reason: signal.reason });
     }
     if (rateLimited) {
-      const signal = this.deps.anomaly.note('policyViolations');
+      const signal = this.deps.notePersisted
+        ? await this.deps.notePersisted(req.ownerId, 'policyViolations')
+        : this.deps.anomaly.note('policyViolations');
       if (signal) emit({ ...base, eventType: 'anomaly.policy_violations', severity: 'medium', action: req.actionType, resource: req.resourceId ?? null, decision: 'deny', reason: signal.reason });
     }
     if (costStopped) {
-      const signal = this.deps.anomaly.note('costSpikes');
+      const signal = this.deps.notePersisted
+        ? await this.deps.notePersisted(req.ownerId, 'costSpikes')
+        : this.deps.anomaly.note('costSpikes');
       if (signal) emit({ ...base, eventType: 'anomaly.cost_spike', severity: 'medium', action: req.actionType, resource: req.resourceId ?? null, decision: 'deny', reason: signal.reason });
     }
   }

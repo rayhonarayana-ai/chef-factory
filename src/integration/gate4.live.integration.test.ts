@@ -44,7 +44,6 @@ function makeTransactionalStore(): ItStore {
     if (!connected) {
       await client.connect();
       await client.query('begin');
-      await client.query(`delete from auth.users where email like 'it-%@chef.local'`);
       for (const id of [owner, other]) {
         await client.query(
           `insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at)

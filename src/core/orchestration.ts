@@ -361,7 +361,7 @@ export async function executeOrchestration(
       action: toolDef.actionType,
       minRisk: toolDef.riskLevel,
       run: async (args: Record<string, unknown>) => {
-        return toolDef.handler({ ownerId: ctx.actorCtx.ownerId, args, db: ctx.toolDb });
+        return toolDef.handler({ ownerId: ctx.actorCtx.ownerId, args, db: ctx.toolDb, store: ctx.store });
       },
     };
     broker.register(tool);
@@ -385,7 +385,7 @@ export async function executeOrchestration(
           actionType,
           permission: permission as Permission,
           risk: request.risk as RiskLevel,
-          authorized: true,
+          authorized: true, // actorType is always 'owner' here — owner is authorized on own projects
           explicitDeny: false,
           authorityOutcome: 'auto',
           scope: 'tool',
@@ -614,6 +614,7 @@ export async function executeOrchestration(
           ownerId: ctx.actorCtx.ownerId,
           args: resolvedArgs,
           db: ctx.toolDb,
+          store: ctx.store,
         });
 
         const handlerResult = await withTimeout(

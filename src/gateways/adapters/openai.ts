@@ -37,6 +37,7 @@ export function createOpenAIAdapter(config: ProviderConfig = {}): ProviderAdapte
           Authorization: `Bearer ${config.apiKey}`,
         },
         body: JSON.stringify(body),
+        signal: request.signal,
       });
       if (!res.ok) throw new Error(`openai request failed: HTTP ${res.status}`);
       const json = (await res.json()) as {

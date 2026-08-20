@@ -22,6 +22,11 @@ import type {
 } from '../core/types.js';
 
 import type {
+  ConversationRecord,
+  ConversationMessage,
+} from '../core/conversation.js';
+
+import type {
   CriticalActionRule,
   RlsProbe,
   SecurityEventRecord,
@@ -33,6 +38,9 @@ import type {
 } from '../core/security/types.js';
 
 export interface TaskPatch {
+  title?: string;
+  description?: string | null;
+  priority?: 'low' | 'medium' | 'high' | 'critical';
   status?: TaskRecord['status'];
   output?: JsonObject | null;
   error?: JsonObject | null;
@@ -200,4 +208,18 @@ export interface Store {
 
   // database / RLS health
   rlsProbe(ownerId: string): Promise<RlsProbe>;
+
+  // ————— Gate 3 — Conversation persistence —————
+  createConversation(ownerId: string, data: { projectId?: string | null; title?: string | null }): Promise<ConversationRecord>;
+  getConversation(ownerId: string, conversationId: string): Promise<ConversationRecord | null>;
+  listConversations(ownerId: string, filter?: { status?: string; limit?: number; offset?: number }): Promise<ConversationRecord[]>;
+  archiveConversation(ownerId: string, conversationId: string): Promise<boolean>;
+  appendMessage(ownerId: string, input: { conversationId: string; role: string; content: string; toolCalls?: unknown; toolCallId?: string | null; name?: string | null; tokenCount?: number | null }): Promise<ConversationMessage>;
+  loadHistory(ownerId: string, conversationId: string, limit?: number): Promise<ConversationMessage[]>;
+
+  // ————— Gate 19 — Audit query (replaces direct getPool bypass) —————
+  queryAudit(ownerId: string, filter?: { limit?: number }): Promise<Record<string, unknown>[]>;
+
+  // ————— Gate 21 — Stale RUNNING task recovery —————
+  recoverStaleRunningTasks(staleBefore: Date): Promise<number>;
 }

@@ -54,7 +54,7 @@ export const GATE3_TOOLS: ToolDefinition[] = [
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'The ID of the project to list tasks for' },
-        status: { type: 'string', description: 'Filter by task status', enum: ['pending', 'in_progress', 'completed', 'failed'] },
+        status: { type: 'string', description: 'Filter by task status', enum: ['created', 'queued', 'running', 'completed', 'failed', 'cancelled', 'paused', 'needs_approval'] },
       },
       required: ['project_id'],
     },
@@ -89,7 +89,7 @@ export const GATE3_TOOLS: ToolDefinition[] = [
       properties: {
         task_id: { type: 'string', description: 'The ID of the task to update' },
         title: { type: 'string', description: 'New title' },
-        status: { type: 'string', description: 'New status', enum: ['pending', 'in_progress', 'completed', 'failed'] },
+        status: { type: 'string', description: 'New status', enum: ['created', 'queued', 'completed', 'failed', 'cancelled', 'paused', 'needs_approval'] },
         priority: { type: 'string', description: 'New priority', enum: ['low', 'medium', 'high', 'critical'] },
         description: { type: 'string', description: 'New description' },
       },

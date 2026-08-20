@@ -42,6 +42,14 @@ export function createOpenCodeZenAdapter(opts: { cliPath?: string | null; enable
             if (code === 0) resolve(out);
             else reject(new Error(err || `exit code ${code}`));
           });
+          if (request.signal) {
+            const onAbort = () => {
+              child.kill('SIGTERM');
+              reject(new DOMException('The operation was aborted', 'AbortError'));
+            };
+            if (request.signal.aborted) { onAbort(); return; }
+            request.signal.addEventListener('abort', onAbort, { once: true });
+          }
         });
         const durationMs = Date.now() - started;
         return {

@@ -7,6 +7,7 @@ import type {
   JsonObject, LessonInput, ModelInfo, PassportRecord, ProjectRecord, RecallItem,
   RuntimeInfo, TaskRecord, TaskRunRecord,
 } from '../core/types.js';
+import type { ConversationRecord, ConversationMessage } from '../core/conversation.js';
 import { emptyPassport } from '../core/passport.js';
 import type { CriticalActionRule, RlsProbe, SecurityEventRecord, SecurityIncidentRecord, SecurityLockdownRecord } from '../core/security/types.js';
 import { CRITICAL_ACTIONS } from '../core/security/criticalActions.js';
@@ -34,6 +35,8 @@ export class MemoryStore implements Store {
   securityEvents: SecurityEventRecord[] = [];
   securityIncidents: SecurityIncidentRecord[] = [];
   securityLockdowns: SecurityLockdownRecord[] = [];
+  conversations: ConversationRecord[] = [];
+  conversationMessages: ConversationMessage[] = [];
 
   // projects / passports
   async getProjectBySlug(ownerId: string, slug: string): Promise<ProjectRecord | null> {
@@ -289,5 +292,95 @@ export class MemoryStore implements Store {
       auditAppendOnly: true,
       securityEventsAppendOnly: true,
     };
+  }
+
+  // ————— Gate 3 — Conversation persistence —————
+
+  async createConversation(ownerId: string, data: { projectId?: string | null; title?: string | null }): Promise<ConversationRecord> {
+    const conv: ConversationRecord = {
+      id: uuid(),
+      ownerId,
+      projectId: data.projectId ?? null,
+      title: data.title ?? null,
+      status: 'active',
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    this.conversations.push(conv);
+    return conv;
+  }
+
+  async getConversation(ownerId: string, conversationId: string): Promise<ConversationRecord | null> {
+    return this.conversations.find((c) => c.ownerId === ownerId && c.id === conversationId) ?? null;
+  }
+
+  async listConversations(ownerId: string, filter?: { status?: string; limit?: number; offset?: number }): Promise<ConversationRecord[]> {
+    const statusFilter = filter?.status ?? 'active';
+    const limit = filter?.limit ?? 50;
+    const offset = filter?.offset ?? 0;
+    return this.conversations
+      .filter((c) => c.ownerId === ownerId && c.status === statusFilter)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(offset, offset + limit);
+  }
+
+  async archiveConversation(ownerId: string, conversationId: string): Promise<boolean> {
+    const conv = this.conversations.find((c) => c.ownerId === ownerId && c.id === conversationId);
+    if (!conv) return false;
+    conv.status = 'archived';
+    conv.updatedAt = now();
+    return true;
+  }
+
+  async appendMessage(ownerId: string, input: { conversationId: string; role: string; content: string; toolCalls?: unknown; toolCallId?: string | null; name?: string | null; tokenCount?: number | null }): Promise<ConversationMessage> {
+    const msg: ConversationMessage = {
+      id: uuid(),
+      conversationId: input.conversationId,
+      ownerId,
+      role: input.role as 'user' | 'assistant' | 'tool' | 'system',
+      content: input.content,
+      toolCalls: input.toolCalls ?? null,
+      toolCallId: input.toolCallId ?? null,
+      name: input.name ?? null,
+      tokenCount: input.tokenCount ?? null,
+      createdAt: now(),
+    };
+    this.conversationMessages.push(msg);
+    return msg;
+  }
+
+  async loadHistory(ownerId: string, conversationId: string, limit: number = 20): Promise<ConversationMessage[]> {
+    const all = this.conversationMessages
+      .filter((m) => m.conversationId === conversationId && m.ownerId === ownerId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return all.slice(-limit);
+  }
+
+  // ————— Gate 19 — Audit query (matches SupabaseStore: filter by project ownership) —————
+  async queryAudit(ownerId: string, filter?: { limit?: number }): Promise<Record<string, unknown>[]> {
+    const limit = filter?.limit ?? 50;
+    const ownerProjectIds = new Set(
+      this.projects.filter((p) => p.ownerId === ownerId).map((p) => p.id),
+    );
+    return this.audit
+      .filter((e) => e.projectId != null && ownerProjectIds.has(e.projectId))
+      .slice(-limit)
+      .reverse()
+      .map((e) => ({ ...e }));
+  }
+
+  // ————— Gate 21 — Stale RUNNING task recovery —————
+  async recoverStaleRunningTasks(staleBefore: Date): Promise<number> {
+    let count = 0;
+    for (const task of this.tasks) {
+      if (task.status === 'running' && task.startedAt && new Date(task.startedAt) < staleBefore) {
+        task.status = 'failed';
+        task.error = { message: 'Process restarted while task was running. Stale RUNNING task recovered to FAILED.' };
+        task.completedAt = new Date().toISOString();
+        task.updatedAt = new Date().toISOString();
+        count++;
+      }
+    }
+    return count;
   }
 }

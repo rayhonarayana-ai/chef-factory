@@ -1,60 +1,65 @@
-// CHEF FACTORY — Gate 3 — update_task tool handler.
+// CHEF FACTORY — Gate 3 → Gate 19 — update_task tool handler.
 // Updates a task's status, title, or description.
+// Gate 19: Uses Store port instead of direct getPool() bypass.
+// Gate 19 (OD31): Adds state transition validation via canTransition().
 
-import { getPool } from '../db/pool.js';
 import type { ToolHandlerInput, ToolHandlerResult } from './types.js';
+import { canTransition, TERMINAL_TASK_STATUSES } from '../core/taskEngine.js';
+import type { TaskStatus } from '../core/types.js';
+
+const VALID_STATUSES = new Set<TaskStatus>([
+  'created', 'queued', 'running', 'completed', 'failed', 'cancelled', 'paused', 'needs_approval',
+]);
 
 export async function updateTaskHandler(input: ToolHandlerInput): Promise<ToolHandlerResult> {
   const { ownerId, args } = input;
   const taskId = typeof args.task_id === 'string' ? args.task_id : '';
   if (!taskId) return { success: false, error: 'task_id is required' };
 
-  const updates: string[] = [];
-  const params: unknown[] = [ownerId, taskId];
-  let paramIdx = 3;
-
-  if (typeof args.title === 'string' && args.title.trim()) {
-    updates.push(`title = $${paramIdx++}`);
-    params.push(args.title.trim());
-  }
-  if (typeof args.status === 'string') {
-    updates.push(`status = $${paramIdx++}`);
-    params.push(args.status);
-  }
-  if (typeof args.priority === 'string') {
-    updates.push(`priority = $${paramIdx++}`);
-    params.push(args.priority);
-  }
-  if (typeof args.description === 'string') {
-    updates.push(`description = $${paramIdx++}`);
-    params.push(args.description);
-  }
-
-  if (updates.length === 0) return { success: false, error: 'no fields to update' };
-
-  updates.push(`updated_at = now()`);
+  if (!input.store) return { success: false, error: 'store not available' };
 
   try {
-    const db = input.db ?? getPool();
-    const res = await db.query(
-      `UPDATE public.tasks
-       SET ${updates.join(', ')}
-       WHERE owner_id = $1 AND id = $2
-       RETURNING id, title, description, status, priority, project_id, created_at, updated_at`,
-      params,
-    );
-    if (res.rows.length === 0) return { success: false, error: 'task not found or access denied' };
-    const row = res.rows[0];
+    const current = await input.store.getTask(ownerId, taskId);
+    if (!current) return { success: false, error: 'task not found or access denied' };
+
+    const patch: Record<string, unknown> = {};
+
+    if (typeof args.title === 'string' && args.title.trim()) {
+      patch.title = args.title.trim();
+    }
+    if (typeof args.status === 'string') {
+      const newStatus = args.status as TaskStatus;
+      if (!VALID_STATUSES.has(newStatus)) {
+        return { success: false, error: `invalid status: ${newStatus}` };
+      }
+      if (TERMINAL_TASK_STATUSES.has(current.status)) {
+        return { success: false, error: `cannot update task in terminal status: ${current.status}` };
+      }
+      if (!canTransition(current.status, newStatus)) {
+        return { success: false, error: `invalid task transition ${current.status} -> ${newStatus}` };
+      }
+      patch.status = newStatus;
+    }
+    if (typeof args.priority === 'string') {
+      patch.priority = args.priority;
+    }
+    if (typeof args.description === 'string') {
+      patch.description = args.description;
+    }
+
+    if (Object.keys(patch).length === 0) return { success: false, error: 'no fields to update' };
+
+    const updated = await input.store.patchTask(ownerId, taskId, patch as Parameters<typeof input.store.patchTask>[2]);
     return {
       success: true,
       data: {
-        id: row.id,
-        title: row.title,
-        description: row.description,
-        status: row.status,
-        priority: row.priority,
-        project_id: row.project_id,
-        updated_at: row.updated_at,
+        id: updated.id,
+        title: updated.title,
+        description: updated.description,
+        status: updated.status,
+        priority: updated.priority,
+        project_id: updated.projectId,
+        updated_at: updated.updatedAt,
       },
     };
   } catch (e) {

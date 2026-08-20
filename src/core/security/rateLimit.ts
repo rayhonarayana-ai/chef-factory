@@ -89,7 +89,6 @@ export class RateLimiter {
 // Persistence is loaded via loadState() and saved via saveState() (async).
 // FAIL-CLOSED: persistence failure does NOT disable rate limiting.
 export class PersistentRateLimiter extends RateLimiter {
-  private persistenceFailureLogged = false;
 
   constructor(
     configs: Omit<RateLimitConfig, 'id' | 'ownerId'>[] = DEFAULT_RATE_LIMITS,
@@ -109,14 +108,11 @@ export class PersistentRateLimiter extends RateLimiter {
         this.windows.set(key, { count: persisted.count, windowStartedAt: persisted.windowStartedAt });
       }
     } catch {
-      if (!this.persistenceFailureLogged) {
-        console.error('[Gate 14] Rate limit persistence load failed — using in-memory fallback');
-        this.persistenceFailureLogged = true;
-      }
+      console.warn('[Gate 14] Rate limit persistence load failed — using in-memory fallback');
     }
   }
 
-  /** Save current in-memory state to persistence (best-effort, fire-and-forget). */
+  /** Save current in-memory state to persistence (best-effort, observable failure). */
   async saveState(ownerId: string, scope: SecurityScopeKey, limitKey: string): Promise<void> {
     if (!this.persistence) return;
     const key = `${ownerId}:${scope}:${limitKey}`;
@@ -125,10 +121,7 @@ export class PersistentRateLimiter extends RateLimiter {
     try {
       await this.persistence.save(ownerId, scope, limitKey, { count: state.count, windowStartedAt: state.windowStartedAt });
     } catch {
-      if (!this.persistenceFailureLogged) {
-        console.error('[Gate 14] Rate limit persistence save failed — using in-memory fallback');
-        this.persistenceFailureLogged = true;
-      }
+      console.warn('[Gate 14] Rate limit persistence save failed — using in-memory fallback');
     }
   }
 
@@ -136,7 +129,7 @@ export class PersistentRateLimiter extends RateLimiter {
   async checkPersisted(ownerId: string, scope: SecurityScopeKey, limitKey: string): Promise<RateLimitDecision> {
     await this.loadState(ownerId, scope, limitKey);
     const decision = this.check(ownerId, scope, limitKey);
-    void this.saveState(ownerId, scope, limitKey);
+    this.saveState(ownerId, scope, limitKey).catch(() => { console.warn('[Gate 17] Rate limit persistence fire-and-forget failed'); });
     return decision;
   }
 }

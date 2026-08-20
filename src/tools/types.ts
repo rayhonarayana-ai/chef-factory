@@ -1,5 +1,8 @@
-// CHEF FACTORY — Gate 3 — Tool handler types.
+// CHEF FACTORY — Gate 3 → Gate 19 — Tool handler types.
 // Common interface for all tool handlers.
+// Gate 19: Added `store` for Store-port dependency injection (replaces direct getPool bypass).
+
+import type { Store } from '../core/ports.js';
 
 export interface DbQuery {
   query: (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
@@ -9,6 +12,7 @@ export interface ToolHandlerInput {
   ownerId: string;
   args: Record<string, unknown>;
   db?: DbQuery;
+  store?: Store;
 }
 
 export interface ToolHandlerResult {

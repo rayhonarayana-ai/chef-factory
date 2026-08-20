@@ -26,6 +26,7 @@ import { PersistentRateLimiter } from '../core/security/rateLimit.js';
 import { PersistentAnomalyDetector } from '../core/security/anomaly.js';
 import { createRateLimitPersistence, createAnomalyPersistence } from '../db/gate14Persistence.js';
 import { getRedactor } from './redact.js';
+import { handleStreamingChat } from './streaming.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC_DIR = resolve(__dirname, '..', '..', 'public');
@@ -35,6 +36,7 @@ const HOST = process.env['FACTORY_API_HOST'] ?? '127.0.0.1';
 // Gate 13 — API boundary limits
 const MAX_BODY_BYTES = 1024 * 1024; // 1 MB
 const API_REQUEST_TIMEOUT_MS = 30_000; // 30 seconds
+const STREAMING_REQUEST_TIMEOUT_MS = 300_000; // 5 minutes for streaming
 const ACCEPTED_CONTENT_TYPES = new Set(['application/json']);
 
 const MIME: Record<string, string> = {
@@ -178,6 +180,18 @@ export async function startServer(opts?: { port?: number; host?: string }): Prom
   const store = new SupabaseStore(pool);
   const auth = new AuthService(cfg);
 
+  // Gate 21: Recover stale RUNNING tasks from prior process crash.
+  const STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
+  try {
+    const staleBefore = new Date(Date.now() - STALE_THRESHOLD_MS);
+    const recovered = await store.recoverStaleRunningTasks(staleBefore);
+    if (recovered > 0) {
+      console.log(`[Gate 21] Startup recovery: ${recovered} stale RUNNING task(s) transitioned to FAILED.`);
+    }
+  } catch (e) {
+    console.warn(`[Gate 21] Startup recovery failed (non-fatal): ${e}`);
+  }
+
   const modelGateway = new ModelGateway(
     new Map([
       ['openai', createResilientAdapter(createOpenAIAdapter({ apiKey: process.env['FACTORY_OPENAI_API_KEY'] }))],
@@ -204,7 +218,7 @@ export async function startServer(opts?: { port?: number; host?: string }): Prom
     rateLimiter,
     anomalyDetector,
   });
-  const pipeline = new CommandPipeline(store, execution, guardian);
+  const pipeline = new CommandPipeline(store, execution, guardian, rateLimiter, anomalyDetector);
   const api = new Api(store, auth, pipeline, execution);
 
   const server = createServer(async (req, res) => {
@@ -245,6 +259,39 @@ export async function startServer(opts?: { port?: number; host?: string }): Prom
         }
 
         const body = await readBody(req);
+
+        // Gate 15 — Streaming chat: stream=true → SSE, stream=false/omitted → JSON
+        if (pathname === '/api/chat' && req.method === 'POST') {
+          const json = (body ?? {}) as Record<string, unknown>;
+          const streamFlag = json['stream'] === true;
+          const command = typeof json['command'] === 'string' ? json['command'] : '';
+          if (!command.trim()) return send(res, 400, { error: 'command is required' });
+          const conversationId = typeof json['conversation_id'] === 'string' ? json['conversation_id'] : null;
+
+          if (streamFlag) {
+            // Switch to streaming timeout
+            clearTimeout(timer);
+            const streamTimer = setTimeout(() => {
+              if (!res.headersSent) {
+                send(res, 408, { error: 'request_timeout' });
+                req.destroy();
+              }
+            }, STREAMING_REQUEST_TIMEOUT_MS);
+
+            try {
+              await handleStreamingChat(req, res, store, pipeline, owner, command, conversationId);
+            } catch (e) {
+              console.error('CHEF FACTORY streaming error:', e);
+              if (!res.headersSent) {
+                await send(res, 500, { error: 'internal_error' });
+              }
+            } finally {
+              clearTimeout(streamTimer);
+            }
+            return;
+          }
+        }
+
         const apiReq: ApiRequest = {
           method: req.method ?? 'GET',
           path: pathname,
@@ -286,6 +333,19 @@ export async function startServer(opts?: { port?: number; host?: string }): Prom
 
 const isMain = process.argv[1] ? /server\.(ts|js)$/.test(process.argv[1]) : false;
 if (isMain) {
+  // Gate 21: Process lifecycle handlers.
+  process.on('SIGTERM', () => {
+    console.log('[Gate 21] SIGTERM received — shutting down gracefully.');
+    process.exit(0);
+  });
+  process.on('SIGINT', () => {
+    console.log('[Gate 21] SIGINT received — shutting down gracefully.');
+    process.exit(0);
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error('[Gate 21] Unhandled rejection (non-fatal):', reason);
+  });
+
   startServer().catch((e) => {
     console.error(`CHEF FACTORY server failed to start: ${e.message}`);
     process.exit(1);

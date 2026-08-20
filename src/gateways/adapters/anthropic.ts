@@ -46,6 +46,7 @@ export function createAnthropicAdapter(config: ProviderConfig = {}): ProviderAda
           'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify(body),
+        signal: request.signal,
       });
       if (!res.ok) throw new Error(`anthropic request failed: HTTP ${res.status}`);
       const json = (await res.json()) as {

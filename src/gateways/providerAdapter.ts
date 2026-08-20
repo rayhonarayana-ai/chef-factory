@@ -20,6 +20,8 @@ export interface ProviderRequest {
   maxTokens?: number;
   temperature?: number;
   tools?: Array<Record<string, unknown>>;
+  /** Gate 22: AbortSignal for execution timeout propagation. */
+  signal?: AbortSignal;
 }
 
 export interface ProviderResponse {

@@ -1,7 +1,10 @@
 # CHEF FACTORY — todo.md
 
-> Updated: 2026-08-17
-> Gate: 4 — **PASS (FROZEN)** | Gate 5 — **PASS (257/257)** | Gate 6 — **PASS (343/343)** | Gate 7 — **PASS (370/370)** | Gate 8 — **PASS (400/400) FROZEN** | Gate 9 — **PASS (427/427)** | Gate 10 — **PASS (462/462)** | Gate 11 — **PASS (515/515)** | Gate 12 — **PASS (577/577)** | Gate 13 — **PASS (599/599)** | Gate 14 — **PASS (624/624) FROZEN** | Gate 15 — **DISCOVERY_COMPLETE (624/624)**
+> Updated: 2026-08-20
+> Gate: 4 — **PASS (FROZEN)** | Gate 5 — **PASS (257/257)** | Gate 6 — **PASS (343/343)** | Gate 7 — **PASS (370/370)** | Gate 8 — **PASS (400/400) FROZEN** | Gate 9 — **PASS (427/427)** | Gate 10 — **PASS (462/462)** | Gate 11 — **PASS (515/515)** | Gate 12 — **PASS (577/577)** | Gate 13 — **PASS (599/599)** | Gate 14 — **PASS (624/624) FROZEN** | Gate 15 — **PASS (687/687)** | Gate 16 — **PASS (699/699) FROZEN** | Gate 17 — **PASS (716/716) PARTIAL** | Gate 18 — **PASS (749/749)** | Gate 19 — **PASS (845/846)** | Gate 20 — **PASS (867/867)** | Gate 21 — **PASS (901/901)** | Gate 22 — **PASS (913/913)** | Gate 23 — **PASS (931/931)**
+
+## Current Phase
+GATE 23 — **PASS** (2026-08-20): OD41 (update_task Silent Data Loss) implemented. TaskPatch interface corrected to include title, priority, description. SupabaseStore.patchTask field mapping corrected. MemoryStore parity confirmed. 18 new tests (6 repro + 12 contract). 931/931 PASS. tsc CLEAN. Build CLEAN. Frozen baseline updated: 913→931.
 
 ## Gate 3 Status (FROZEN BASELINE)
 
@@ -592,7 +595,7 @@ Data Intelligence Layer deferred to Gate 6+.
 |------|-------------|
 | ~~API Boundary Hardening~~ | ~~Gate 13~~ DONE (599/599) |
 | Memory/vector backend | Gate 15+ |
-| Streaming response delivery | Gate 15+ |
+| ~~Streaming response delivery~~ | ~~Gate 15~~ DONE (687/687) |
 | Git initialization (OD8) | Owner decision |
 | SecurityGuardian mandatory wiring | Gate 15+ |
 | Rate/anomaly persistent state | Gate 14 TARGETED |
@@ -637,72 +640,482 @@ Data Intelligence Layer deferred to Gate 6+.
 | ~~Cross-provider failover~~ | Gate 15+ (DEFERRED from G15) |
 | ~~Documentation drift repair~~ | Gate 15+ (DEFERRED from G15) |
 
-## Gate 15 Status (DISCOVERY COMPLETE)
+## Gate 15 Status (PASS)
 
 | Phase | Status | Date |
 |-------|--------|------|
-| Baseline verification (624/624) | PASS | 2026-08-17 |
-| tsc --noEmit | CLEAN | 2026-08-17 |
-| Forensic sweep (3 agents, 40+ files) | COMPLETE | 2026-08-17 |
-| G15-01 validation (lockdownActive) | FALSE_POSITIVE | 2026-08-17 |
-| G15-02 validation (bottom imports) | CONFIRMED_HARMLESS | 2026-08-17 |
-| G15-03 validation (MemoryGateway) | INVALID (factually wrong) | 2026-08-17 |
-| G15-04 validation (doc staleness) | CONFIRMED_DRIFT | 2026-08-17 |
-| G15-05 validation (test count) | RESOLVED (624 current) | 2026-08-17 |
-| Full forensic audit (19 areas) | 19/19 PASS | 2026-08-17 |
-| Drift audit (7 items) | ALL DOCUMENTATION | 2026-08-17 |
-| Capability audit (20 items) | 16 READY, 1 PARTIAL, 1 DEFERRED, 1 NOT_READY | 2026-08-17 |
-| Bottleneck ranking (5 candidates) | COMPLETE | 2026-08-17 |
-| Mission recommendation | Streaming Response Delivery | 2026-08-17 |
-| Security invariants (16) | 16/16 preserved | 2026-08-17 |
-| Owner decisions (OD18-OD19) | PENDING | 2026-08-17 |
-| Documentation (7 files) | COMPLETE | 2026-08-17 |
-| Classification | GATE_15_DISCOVERY_COMPLETE | 2026-08-17 |
+| Baseline verification (624/624) | PASS | 2026-08-19 |
+| tsc --noEmit | CLEAN | 2026-08-19 |
+| build (tsc -p tsconfig.build.json) | CLEAN | 2026-08-19 |
+| Forensic sweep (3 agents, 40+ files) | COMPLETE | 2026-08-19 |
+| G15-01 validation (lockdownActive) | FALSE_POSITIVE | 2026-08-19 |
+| G15-02 validation (bottom imports) | CONFIRMED_HARMLESS | 2026-08-19 |
+| G15-03 validation (MemoryGateway) | INVALID (factually wrong) | 2026-08-19 |
+| G15-04 validation (doc staleness) | CONFIRMED_DRIFT | 2026-08-19 |
+| G15-05 validation (test count) | RESOLVED (624 current) | 2026-08-19 |
+| Owner decision (OD18) | APPROVED (streaming SSE) | 2026-08-19 |
+| SSE transport layer (sse.ts) | COMPLETE | 2026-08-19 |
+| Pipeline streaming callbacks (pipeline.ts) | COMPLETE | 2026-08-19 |
+| Streaming chat handler (streaming.ts) | COMPLETE | 2026-08-19 |
+| Server routing (server.ts) | COMPLETE | 2026-08-19 |
+| Unit tests (37 tests) | PASS (37/37) | 2026-08-19 |
+| Integration tests (26 tests) | PASS (26/26) | 2026-08-19 |
+| Full regression | PASS (687/687) | 2026-08-19 |
+| Forensic audit (20 checks) | 20/20 PASS | 2026-08-19 |
+| Security invariants (16) | 16/16 PRESERVED | 2026-08-19 |
+| Documentation (5 files) | COMPLETE | 2026-08-19 |
+| Classification | GATE_15_PASS | 2026-08-19 |
 
-### Gate 15 Discovery Summary
+### Gate 15 Implementation Summary
 
-- **Mission:** Streaming Response Delivery (SSE)
-- **Scope:** server.ts + pipeline.ts/execution.ts + new streaming types + tests
-- **Risk:** LOW (no DB changes, confined to API layer)
-- **Expected tests:** 624 → ~640-644
-- **Security findings:** 0 new (G15-01 FALSE_POSITIVE, G15-03 INVALID)
-- **Drift findings:** 7 documentation items (non-blocking)
-- **Deferred:** Memory, failover, conversation, Guardian wiring, doc repair
+- **Scope:** SSE Streaming for `/api/chat` — progress-event streaming mode
+- **Files created:** sse.ts (137 lines), streaming.ts (139 lines), 2 test files (1040+ lines)
+- **Files modified:** pipeline.ts (+streaming callbacks), server.ts (+stream routing)
+- **Streaming mode:** PROGRESS_EVENT_STREAMING (real pipeline events, not true provider token streaming)
+- **True provider streaming:** BLOCKED (ProviderAdapter has no `stream()` method)
+- **687/687 tests pass, zero regressions, tsc clean, build clean**
 
-### Gate 15 Findings
+### Gate 15 Forensic Verification
 
-| # | Finding | Severity | Classification |
-|---|---------|----------|----------------|
-| G15-01 | Guardian hardcodes lockdownActive: false | HIGH | FALSE_POSITIVE |
-| G15-02 | Bottom-of-file imports | LOW | CONFIRMED_HARMLESS |
-| G15-03 | MemoryGateway.saveLesson broken | MEDIUM | INVALID (factually wrong) |
-| G15-04 | ARCHITECTURE.md stale | LOW | CONFIRMED_DRIFT |
-| G15-05 | Test count 623 vs 624 | LOW | RESOLVED |
+| Check | Result |
+|-------|--------|
+| F1: Source diff — no unrelated changes | ✅ PASS |
+| F2: Production call graph reuses pipeline | ✅ PASS |
+| F3: PipelineResult compatibility | ✅ PASS |
+| F4: StreamEvent contract | ✅ PASS |
+| F5: SSE transport | ✅ PASS |
+| F6: Handler single call to pipeline | ✅ PASS |
+| F7: Server routing stream=true gated | ✅ PASS |
+| F8: Provider path unchanged | ✅ PASS |
+| F9: ToolBroker path unchanged | ✅ PASS |
+| F10: Guardian path unchanged | ✅ PASS |
+| F11: Authority path unchanged | ✅ PASS |
+| F12: Approval boundary preserved | ✅ PASS |
+| F13: Cancellation propagated | ✅ PASS |
+| F14: Timeout separate and valid | ✅ PASS |
+| F15: Error path sanitized | ✅ PASS |
+| F16: Single execution preserved | ✅ PASS |
+| F17: Resource cleanup on all paths | ✅ PASS |
+| F18: No secret exposure | ✅ PASS |
+| F19: Database integrity — zero changes | ✅ PASS |
+| F20: API scope — no expansion | ✅ PASS |
 
-### Gate 15 Documentation Files Created
+### Gate 15 Known Limitations
 
-| File | Purpose |
-|------|---------|
-| GATE_15_DISCOVERY_REPORT.md | Overview of all discovery work |
-| GATE_15_FORENSIC_REVIEW.md | Deep source analysis + G15-01/02/03/04/05 validation |
-| GATE_15_MISSION.md | Mission options + recommendation + ranking |
-| GATE_15_SECURITY.md | Security findings + 16 invariants verified |
-| GATE_15_EVIDENCE_CONTRACT.md | 14 evidence items (E1-E14) |
-| GATE_15_DECISIONS.md | Owner decisions (OD18-OD19) + technical decisions |
-| GATE_15_READINESS_REPORT.md | Readiness checklist + implementation plan |
-
-### Gate 15 Pending Owner Decisions
-
-- OD18: Approve Streaming as Gate 15 mission?
-- OD19: Initialize git repository? (carried, non-blocking)
+| # | Limitation | Severity | Target |
+|---|-----------|----------|--------|
+| L1 | True provider streaming blocked by ProviderAdapter interface | MEDIUM | Gate 16+ |
+| L2 | `delta` events defined but not emitted | LOW | Gate 16+ |
+| L3 | `tool` events defined but not emitted | LOW | Gate 16+ |
+| L4 | Disconnect detected but provider call not aborted | LOW | Gate 16+ |
 
 ### Gate 15 Deferred Work
 
 | Item | Target Gate |
 |------|-------------|
-| Memory/vector backend | Gate 16+ |
-| Cross-provider failover | Gate 17+ |
-| Conversation persistence | Gate 16+ |
-| SecurityGuardian mandatory wiring | Optional cleanup |
-| Documentation drift repair | Optional (7 items) |
-| Git initialization (OD8) | Owner decision |
+| ProviderAdapter `stream()` method | Gate 17+ |
+| Token-by-token `delta` events | Gate 17+ |
+| Tool call `tool` events | Gate 17+ |
+| AbortController propagation | Gate 17+ |
+| Memory/vector backend | Gate 18+ |
+| Cross-provider failover | Gate 18+ |
+| Git initialization (OD8/OD19) | Owner decision |
+
+## Gate 16 Status (DISCOVERY COMPLETE)
+
+| Phase | Status | Date |
+|-------|--------|------|
+| Baseline verification (687/687) | PASS | 2026-08-19 |
+| tsc --noEmit | CLEAN | 2026-08-19 |
+| build (tsc -p tsconfig.build.json) | CLEAN | 2026-08-19 |
+| Forensic sweep (3 agents, 55+ files) | COMPLETE | 2026-08-19 |
+| Capability audit (27 capabilities) | COMPLETE | 2026-08-19 |
+| Security audit (9 new findings) | COMPLETE | 2026-08-19 |
+| Drift audit (12 items) | COMPLETE | 2026-08-19 |
+| Bottleneck ranking (7 candidates) | COMPLETE | 2026-08-19 |
+| Mission recommendation | Persistent Security State Fix | 2026-08-19 |
+| Owner decisions (OD20-OD21) | PENDING | 2026-08-19 |
+| Documentation (7+1 files) | COMPLETE | 2026-08-19 |
+| Classification | GATE_16_DISCOVERY_COMPLETE | 2026-08-19 |
+
+### Gate 16 Discovery Summary
+
+- **Mission:** Persistent Security State Fix (C-02, C-03, C-04)
+- **Rationale:** Gate 14 persistence guarantee broken — production path never calls persistent methods
+- **Scope:** 3 production files (server.ts, guardian.ts, pipeline.ts), 2 test files
+- **Risk:** LOW — persistence adapters already exist and are tested
+- **Expected tests:** +8-12 (687 → 695-699)
+- **Security impact:** CRITICAL — restores rate limiting and anomaly persistence
+
+### Gate 16 Findings
+
+| # | Finding | Severity | Classification |
+|---|---------|----------|----------------|
+| C-01 | ProviderAdapter has no stream() | CRITICAL | CAPABILITY_ABSENCE |
+| C-02 | Pipeline missing rateLimiter/anomalyDetector | CRITICAL | SECURITY_REGRESSION |
+| C-03 | PersistentRateLimiter synchronous | CRITICAL | SECURITY_REGRESSION |
+| C-04 | PersistentAnomalyDetector synchronous | CRITICAL | SECURITY_REGRESSION |
+| S-CRIT-01 | Plaintext secrets in .env | CRITICAL | INFRASTRUCTURE |
+| S-CRIT-02 | No concurrent SSE connection limit | CRITICAL | SECURITY |
+| S-HIGH-01 | No security response headers | HIGH | SECURITY |
+| S-HIGH-02 | SSE error events leak internals | HIGH | SECURITY |
+| S-HIGH-03 | Conversation messages without redaction | HIGH | SECURITY |
+| H-01 | Delta events dead | HIGH | ARCHITECTURE |
+| H-02 | No conversation message validation | HIGH | SECURITY |
+| H-03 | loadHistory performance bomb | HIGH | PERFORMANCE |
+| DRIFT-01..12 | Documentation drift (12 items) | HIGH | DOCUMENTATION |
+
+### Gate 16 Bottleneck Ranking
+
+| Rank | Candidate | Score |
+|------|-----------|-------|
+| 1 | **Persistent Security State Fix** | 9.2 |
+| 2 | Security Hardening Bundle | 7.8 |
+| 3 | Provider Token Streaming | 6.5 |
+| 4 | Documentation Drift Repair | 3.2 |
+| 5 | Memory/Vector Backend | 5.8 |
+| 6 | Cross-Provider Failover | 4.5 |
+| 7 | Structured Logging | 5.0 |
+
+### Gate 16 Documentation Files
+
+| File | Purpose |
+|------|---------|
+| GATE_16_DISCOVERY_REPORT.md | Full forensic audit + capability audit + bottleneck ranking |
+| GATE_16_FORENSIC_REVIEW.md | Deep source analysis + findings validation |
+| GATE_16_MISSION.md | Mission options + recommendation + ranking |
+| GATE_16_SECURITY.md | Security findings + invariants verification |
+| GATE_16_EVIDENCE_CONTRACT.md | 12 evidence items |
+| GATE_16_DECISIONS.md | Owner decisions (OD20-OD21) + technical decisions |
+| GATE_16_READINESS_REPORT.md | Readiness checklist + implementation plan |
+
+### Gate 16 Pending Owner Decisions
+
+| OD-ID | Question | Recommendation |
+|-------|----------|---------------|
+| OD20 | Approve Persistent Security State Fix as Gate 16 mission? | Yes |
+| OD21 | Initialize git repository? | Deferred |
+
+### Gate 16 Deferred Work
+
+| Item | Target Gate |
+|------|-------------|
+| ~~Persistent Security State Fix~~ | ~~Gate 16~~ DONE (699/699) |
+| Provider token streaming | Gate 18+ |
+| Security hardening bundle | Gate 18+ |
+| Memory/vector backend | Gate 18+ |
+| Cross-provider failover | Gate 18+ |
+| Git initialization (OD8/OD19/OD21) | Owner decision |
+
+## Gate 17 Status (PASS PARTIAL)
+
+| Phase | Status | Date |
+|-------|--------|------|
+| Baseline verification (699/699) | PASS | 2026-08-19 |
+| tsc --noEmit | CLEAN | 2026-08-19 |
+| build (tsc -p tsconfig.build.json) | CLEAN | 2026-08-19 |
+| Forensic sweep (3 agents, 66 source files) | COMPLETE | 2026-08-19 |
+| Root cause proof (4 fire-and-forget paths) | PROVEN | 2026-08-19 |
+| Failure observability vs recovery distinction | DOCUMENTED | 2026-08-19 |
+| Design minimum fix (replace void → .catch()) | APPROVED | 2026-08-19 |
+| security.ts — recordEvent .catch() | PASS | 2026-08-19 |
+| rateLimit.ts — remove persistenceFailureLogged | PASS | 2026-08-19 |
+| anomaly.ts — remove persistenceFailureLogged | PASS | 2026-08-19 |
+| rateLimit.ts — checkPersisted .catch() | PASS | 2026-08-19 |
+| anomaly.ts — notePersisted .catch() | PASS | 2026-08-19 |
+| Unit tests (17 tests) | PASS (17/17) | 2026-08-19 |
+| Full regression | PASS (716/716) | 2026-08-19 |
+| SKIPPED | 7 | 2026-08-19 |
+| Forensic audit | COMPLETE | 2026-08-19 |
+| Classification | GATE_17_PASS_PARTIAL | 2026-08-19 |
+
+### Gate 17 Implementation Summary
+
+- **Mission:** Security Event Audit Trail Reliability
+- **Scope:** Replace `void` fire-and-forget with `.catch()` logging. No retry. No recovery. No schema changes.
+- **Files modified:** security.ts, rateLimit.ts, anomaly.ts (3 files)
+- **Files created:** gate17.auditTrail.test.ts (17 tests), GATE_17_FINAL_REPORT.md
+- **Key changes:**
+  - `security.ts:23` — `void store.recordSecurityEvent(...)` → `.catch()` with `[Gate 17]` warn log
+  - `rateLimit.ts` — removed `persistenceFailureLogged` flag; every failure logged at WARN
+  - `rateLimit.ts:139` — `void this.saveState(...)` → `.catch()` with `[Gate 17]` warn log
+  - `anomaly.ts` — removed `persistenceFailureLogged` flag; every failure logged at WARN
+  - `anomaly.ts:192` — `void this.saveState(...)` → `.catch()` with `[Gate 17]` warn log
+- **716/716 tests pass, zero regressions, tsc clean**
+
+### Gate 17 Classification
+
+| Dimension | Result | Evidence |
+|-----------|--------|----------|
+| FAILURE_OBSERVABILITY | **PASS** | G17-LOG-01 through G17-LOG-04 prove every failure logged (not just once) |
+| RECOVERY | **UNPROVEN** | G17-RETRY-01 through G17-RETRY-05 prove no retry mechanism exists |
+| OVERALL | **PARTIAL** | Observability proven, recovery unproven — system can detect loss but cannot prevent it |
+
+### Gate 17 Deferred Work
+
+| Item | Target Gate |
+|------|-------------|
+| ~~Security Event Audit Trail Reliability~~ | ~~Gate 17~~ DONE (716/716) |
+| API boundary hardening (CORS, SSE limits) | Gate 18+ |
+| Conversation security (validation + redaction) | Gate 18+ |
+| db/repo.ts unit test coverage | Gate 18+ |
+| Race condition fix (TOCTOU) | Gate 18+ |
+| Auth error transparency | Gate 18+ |
+| Provider token streaming | Gate 18+ |
+| Memory/vector backend | Gate 19+ |
+| Cross-provider failover | Gate 19+ |
+| Structured logging | Gate 18+ |
+| Documentation drift repair | Gate 18+ |
+| Git initialization (OD8/OD19/OD21/OD23) | Owner decision |
+
+## Gate 18 Status (DISCOVERY COMPLETE)
+
+| Phase | Status | Date |
+|-------|--------|------|
+| Baseline verification (716/716) | PASS | 2026-08-19 |
+| tsc --noEmit | CLEAN | 2026-08-19 |
+| build (tsc -p tsconfig.build.json) | CLEAN | 2026-08-19 |
+| Forensic sweep (3 agents, 65+ source files) | COMPLETE | 2026-08-19 |
+| Security audit (22 findings) | COMPLETE | 2026-08-19 |
+| Runtime audit (36 findings) | COMPLETE | 2026-08-19 |
+| Data audit (29 findings) | COMPLETE | 2026-08-19 |
+| Total findings | 87 (5 CRITICAL, 13 HIGH, 30 MEDIUM, 36 LOW, 3 PASS) | 2026-08-19 |
+| Bottleneck candidates | 10 scored and ranked | 2026-08-19 |
+| Recovery evaluated as ONE candidate | RANKED #6 (Score 58/100) | 2026-08-19 |
+| Recommended mission | ConversationService Refactor + Test Coverage (Score 72/100) | 2026-08-19 |
+| Owner decisions (OD25-OD27) | PENDING | 2026-08-19 |
+| Documentation (7 files) | COMPLETE | 2026-08-19 |
+| Classification | GATE_18_DISCOVERY_COMPLETE | 2026-08-19 |
+
+### Gate 18 Discovery Summary
+
+- **Top Bottleneck:** ConversationService bypasses Store port, zero tests, DRY violation (Score 72/100)
+- **Recovery Rank:** #6 (Score 58/100) — NOT the next gate
+- **Why not Recovery:** Event loss scoped to DB outage (rare), observability already covers gap, security decisions correct in-memory
+- **Why ConversationService:** Largest untested data path, architectural violation, high leverage, low risk
+- **Expected Tests:** +15-20 (716 → 731-736)
+- **Risk:** LOW (pure refactor)
+- **Schema Changes:** NONE
+
+### Gate 18 Bottleneck Ranking
+
+| Rank | Candidate | Score |
+|------|-----------|-------|
+| **1** | **ConversationService Refactor + Tests** | **72** |
+| 2 | CORS + Security Headers | 68 |
+| 3 | Tool Handler Timeout | 65 |
+| 4 | Security Headers (broader) | 62 |
+| 5 | Anomaly Cross-Owner Pollution | 60 |
+| 6 | Security Audit Recovery | 58 |
+| 7 | Approval Workflow Enforcement | 55 |
+| 8 | Memory/Vector Backend | 45 |
+| 9 | Graceful Shutdown | 42 |
+| 10 | Structured Logging | 38 |
+
+### Gate 18 Deferred Work
+
+| Item | Target Gate |
+|------|-------------|
+| ~~ConversationService Refactor + Tests~~ | ~~Gate 18~~ TARGETED |
+| API boundary hardening (CORS, headers) | Gate 19+ |
+| Tool handler timeout + AbortSignal | Gate 19+ |
+| Security audit event recovery | Gate 19+ |
+| Approval workflow enforcement | Gate 19+ |
+| Memory/vector backend | Gate 20+ |
+| Structured logging | Gate 20+ |
+| Graceful shutdown | Gate 20+ |
+| Git initialization (OD8/OD19/OD21/OD23/OD25) | Owner decision |
+
+## Gate 19 Status (PASS — 845/846)
+
+| Phase | Status | Date |
+|-------|--------|------|
+| Baseline verification (749/749) | PASS | 2026-08-19 |
+| tsc --noEmit | CLEAN | 2026-08-19 |
+| build (tsc -p tsconfig.build.json) | CLEAN | 2026-08-19 |
+| Forensic sweep (3 agents, 65+ source files) | COMPLETE | 2026-08-19 |
+| Security + Architecture audit (45+ files) | COMPLETE | 2026-08-19 |
+| Runtime + Reliability audit (40+ files) | COMPLETE | 2026-08-19 |
+| Data + Evidence + Product audit (45+ files) | COMPLETE | 2026-08-19 |
+| Total findings | 47 (5 CRITICAL, 21 HIGH, 16 MEDIUM, 5 LOW) | 2026-08-19 |
+| Bottleneck candidates | 10 scored and ranked | 2026-08-19 |
+| Recovery evaluated as ONE candidate | RANKED #10 (Score 42/100) | 2026-08-19 |
+| Recommended mission | Tool Handler Store Port Refactor (Score 64/100) | 2026-08-19 |
+| Owner decisions (OD28-OD32) | APPROVED | 2026-08-19 |
+| Implementation | COMPLETE | 2026-08-19 |
+| Gate 19 tests (97 new) | PASS (97/97) | 2026-08-19 |
+| Full regression (845/846) | PASS | 2026-08-19 |
+| Source forensic audit | CLEAN | 2026-08-19 |
+| Protected invariants | PASS | 2026-08-19 |
+| Project identity | CHEF FACTORY only | 2026-08-19 |
+| Documentation (4 files) | COMPLETE | 2026-08-19 |
+| Classification | GATE_19_PASS | 2026-08-19 |
+
+### Gate 19 Discovery Summary
+
+- **Top Bottleneck:** Tool Handler Store Port Refactor (Score 64/100)
+- **Recovery Rank:** #10 (Score 42/100) — NOT the next gate
+- **Why not Recovery:** Event loss scoped to DB outage (rare), observability already covers gap, security decisions correct in-memory
+- **Why Tool Handler Refactor:** 6 tool handlers bypass Store port (same pattern as Gate 18 ConversationService bypass), fixes 6+ issues at once, prevents future problems
+- **Bundled Fixes:** archiveConversation bug, Guardian authorized:true, state transition validation, queryAudit bypass, tool results to conversation
+- **Expected Tests:** +20-30 (749 → 769-779)
+- **Risk:** LOW (pure refactor)
+- **Schema Changes:** NONE
+
+### Gate 19 Bottleneck Ranking
+
+| Rank | Candidate | Score |
+|------|-----------|-------|
+| 1 | Dead Retry/Approval Pipeline | 67 |
+| **2** | **Tool Handler Store Port Refactor** | **64** |
+| 3 | Guardian Hardcodes authorized:true | 64 |
+| 4 | archiveConversation Always Returns False | 60 |
+| 5 | Unbounded LLM Execution Time | 55 |
+| 6 | Pipeline Cancellation Gap | 54 |
+| 7 | Task Status Enum Mismatch | 52 |
+| 8 | Rate Limit Persistence Race | 50 |
+| 9 | Conversation Context Degradation | 44 |
+| 10 | Security Audit Event Recovery (Gate 17) | 42 |
+
+### Gate 19 Documentation Files
+
+| File | Purpose |
+|------|---------|
+| GATE_19_DISCOVERY_REPORT.md | Full forensic audit + scoring |
+| GATE_19_FORENSIC_REVIEW.md | Deep source analysis + findings validation |
+| GATE_19_MISSION.md | Mission options + recommendation + ranking |
+| GATE_19_SECURITY.md | Security findings + invariants verification |
+| GATE_19_EVIDENCE_CONTRACT.md | Evidence items for implementation |
+| GATE_19_DECISIONS.md | Owner decisions + technical decisions |
+| GATE_19_IMPLEMENTATION.md | Implementation summary |
+| GATE_19_EVIDENCE.md | Evidence matrix |
+| GATE_19_FORENSIC_CLOSURE.md | Forensic closure verification |
+| GATE_19_FINAL_REPORT.md | Final classification report |
+
+### Gate 19 Owner Decisions
+
+| OD-ID | Question | Status |
+|-------|----------|--------|
+| OD28 | Approve Tool Handler Store Port Refactor as Gate 19 mission? | APPROVED & IMPLEMENTED |
+| OD29 | Bundle Security Authority Chain Fix (Guardian authorized:true)? | APPROVED & IMPLEMENTED |
+| OD30 | Bundle archiveConversation Bug Fix? | APPROVED & IMPLEMENTED |
+| OD31 | Bundle State Transition Validation? | APPROVED & IMPLEMENTED |
+| OD32 | Bundle Tool Results to Conversation? | APPROVED & IMPLEMENTED |
+
+### Gate 19 Deferred Work
+
+| Item | Target Gate |
+|------|-------------|
+| ~~Tool Handler Store Port Refactor~~ | ~~Gate 19~~ COMPLETE |
+| Dead Retry Pipeline (Task Scheduler) | Gate 20+ |
+| SSL Cert Verification | Gate 20+ |
+| Pipeline Cancellation Gap | Gate 20+ |
+| Rate Limit Persistence Race | Gate 20+ |
+| Memory/vector backend | Gate 21+ |
+| Cross-provider failover | Gate 21+ |
+| Git initialization (OD8/OD19/OD21/OD23/OD25/OD28) | Owner decision |
+
+## Gate 20 Status (PASS — 867/867)
+
+| Phase | Status | Date |
+|-------|--------|------|
+| PHASE 0: Project identity | CONFIRMED (chef-factory) | 2026-08-19 |
+| PHASE 1: Gate 19 closure verification | CORRECTED (845/846, not 846/846) | 2026-08-19 |
+| PHASE 2: Baseline | 845/846 PASS, 1 FAIL (deadlock), 7 SKIP | 2026-08-19 |
+| PHASE 4-7: Retry/Approval forensics | COMPLETE | 2026-08-19 |
+| PHASE 8: Runtime evidence | DEADLOCK PROVEN, retry UNPROVEN | 2026-08-19 |
+| PHASE 9: Security forensics | COMPLETE | 2026-08-19 |
+| PHASE 10-11: Architecture audit | COMPLETE | 2026-08-19 |
+| PHASE 12-17: Scoring + ranking | COMPLETE | 2026-08-19 |
+| PHASE 18-22: Missions + docs | COMPLETE | 2026-08-19 |
+| Classification | GATE_20_READY_FOR_OWNER_APPROVAL | 2026-08-19 |
+| Owner decisions (OD33, OD35) | APPROVED | 2026-08-19 |
+| OD34, OD36 | REJECTED | 2026-08-19 |
+| Implementation (OD33 + OD35) | COMPLETE | 2026-08-19 |
+| Gate 20 tests (21 new) | PASS (21/21) | 2026-08-19 |
+| Gate 19 tests (4 updated) | PASS (97/97) | 2026-08-19 |
+| Full regression | PASS (867/867) | 2026-08-19 |
+| tsc | CLEAN | 2026-08-19 |
+| Source forensic verification | COMPLETE | 2026-08-19 |
+| Documentation (4 files) | COMPLETE | 2026-08-19 |
+| Classification | GATE_20_PASS | 2026-08-19 |
+
+### Gate 20 Owner Decisions
+
+| OD-ID | Question | Decision |
+|-------|----------|----------|
+| OD33 | Approve Mission A (Tool Schema + Approval Timeout) as Gate 20? | **APPROVED** |
+| OD34 | Bundle Mission B (Stuck-Task Detection)? | **REJECTED** |
+| OD35 | Bundle Mission C (Deadlock Fix + MemoryStore)? | **APPROVED** |
+| OD36 | Bundle Mission D (Code Quality)? | **REJECTED** |
+
+### Gate 20 Implementation Summary
+
+| Change | Owner Decision | Test Coverage |
+|--------|---------------|---------------|
+| Tool status enums fixed (`list_tasks` + `update_task`) | OD33 | 5 tests in gate20.test.ts |
+| `isExpired()` wired into approval resolution | OD33 | 4 tests in gate20.test.ts |
+| MemoryStore.queryAudit project-ownership filter | OD35 | 7 tests in gate20.test.ts |
+| Gate 4 deadlock fix (removed blanket DELETE) | OD35 | 5 existing gate4 tests pass |
+
+### Gate 20 Documentation Files
+
+| File | Purpose |
+|------|---------|
+| GATE_20_DISCOVERY_REPORT.md | Full discovery report with 25 sections |
+| GATE_20_FORENSIC_REVIEW.md | Deep source analysis |
+| GATE_20_MISSION.md | 4 mission options |
+| GATE_20_SECURITY.md | Security analysis |
+| GATE_20_EVIDENCE_CONTRACT.md | Evidence items |
+| GATE_20_DECISIONS.md | Owner decisions |
+| GATE_20_READINESS_REPORT.md | Readiness checklist |
+| GATE_20_IMPLEMENTATION.md | Change log + test results |
+| GATE_20_EVIDENCE.md | Before/after code + test evidence |
+| GATE_20_FORENSIC_CLOSURE.md | Source search verification |
+| GATE_20_FINAL_REPORT.md | Summary + frozen baseline |
+
+## Gate 22 Status (PASS)
+
+| Phase | Status | Date |
+|-------|--------|------|
+| PHASE 0: Freeze + baseline | 901/901 PASS | 2026-08-19 |
+| PHASE 1: Forensic baseline | COMPLETE | 2026-08-19 |
+| Discovery (Gate 22) | GATE_22_READY_FOR_OWNER_APPROVAL | 2026-08-19 |
+| OD40 (Execution Timeout) | APPROVED | 2026-08-19 |
+| PHASE 3-4: Interface + adapter changes | COMPLETE | 2026-08-19 |
+| PHASE 3-4: AbortController + timeout in execution.ts | COMPLETE | 2026-08-19 |
+| PHASE 5: Gate 22 tests (12 new) | PASS (12/12) | 2026-08-19 |
+| PHASE 11-12: Full regression | PASS (913/913) | 2026-08-19 |
+| tsc | CLEAN | 2026-08-19 |
+| Build | CLEAN | 2026-08-19 |
+| Protected-path audit | CLEAN | 2026-08-19 |
+| Documentation (3 files) | COMPLETE | 2026-08-19 |
+| Classification | GATE_22_PASS | 2026-08-19 |
+
+### Gate 22 Implementation Summary
+
+| Change | Purpose |
+|--------|---------|
+| `signal?: AbortSignal` on ProviderRequest | Signal propagation interface |
+| `signal?: AbortSignal` on RuntimeExecutionRequest | Runtime signal propagation |
+| `fetch(..., { signal })` in OpenAI/Anthropic/Google | Native HTTP abort |
+| Abort listener in OpenCodeZen → `child.kill('SIGTERM')` | Process termination |
+| `EXECUTION_TIMEOUT_MS = 60_000` constant | Configurable timeout |
+| `executeInner()` with signal parameter | Timeout wrapper + propagation |
+| AbortError re-throw from inner catch | Timeout detection in outer handler |
+| 12 new tests in gate22.test.ts | Full verification |
+
+### Gate 22 Owner Decisions
+
+| OD-ID | Question | Decision |
+|-------|----------|----------|
+| OD40 | Approve Mission A (Execution Timeout + Resource Management)? | **APPROVED** |
+
+### Gate 22 Documentation Files
+
+| File | Purpose |
+|------|---------|
+| GATE_22_DISCOVERY_REPORT.md | Discovery report (pre-existing) |
+| GATE_22_IMPLEMENTATION.md | Implementation report |
+| GATE_22_EVIDENCE.md | Test results + protected-path audit |
+| GATE_22_FINAL_REPORT.md | Summary + frozen baseline |

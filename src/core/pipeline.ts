@@ -38,6 +38,16 @@ import type { RateLimiter } from './security/rateLimit.js';
 import type { AnomalyDetector } from './security/anomaly.js';
 import type { DbQuery } from '../tools/types.js';
 
+// ─── Gate 15: Streaming Callbacks ───────────────────────────────────
+export type StreamingEventType = 'start' | 'tool' | 'approval' | 'error' | 'complete' | 'cancelled';
+
+export interface StreamingCallbacks {
+  onEvent(type: StreamingEventType, data: Record<string, unknown>): void;
+  isCancelled(): boolean;
+}
+
+export type StreamingCallbacksOptional = StreamingCallbacks | null | undefined;
+
 export interface ActorContext {
   ownerId: string;
   actorId: string;
@@ -53,6 +63,8 @@ export interface ExecutionOutcome {
   runtimeId?: string | null;
   cost?: number;
   reason?: string;
+  /** Gate 19 (OD32): Tool call results for conversation persistence. */
+  toolMessages?: Array<{ role: 'tool'; content: string; tool_call_id: string; name: string }>;
 }
 
 export interface ConversationMessage {
@@ -105,6 +117,8 @@ export interface PipelineResult {
   task: TaskRecord | null;
   correlationId: string;
   explanation: Explanation;
+  /** Gate 19 (OD32): Tool call results for conversation persistence. */
+  toolMessages?: Array<{ role: 'tool'; content: string; tool_call_id: string; name: string }>;
 }
 
 const VERB_PERMISSION: Record<string, Permission> = {
@@ -155,11 +169,11 @@ export class CommandPipeline {
     private readonly toolDb?: DbQuery,
   ) {}
 
-  async run(ctx: ActorContext, raw: string, conversationHistory?: ConversationMessage[]): Promise<PipelineResult> {
+  async run(ctx: ActorContext, raw: string, conversationHistory?: ConversationMessage[], streaming?: StreamingCallbacksOptional): Promise<PipelineResult> {
     const correlationId = crypto.randomUUID();
     const intent = parseIntent(raw);
 
-    await this.store.recordAudit({
+    await this.safeAudit({
       actorType: ctx.actorType,
       actorId: ctx.actorId,
       action: 'command.received',
@@ -173,6 +187,11 @@ export class CommandPipeline {
       metadata: { command: redactText(intent.normalized), intentStatus: intent.status },
     });
 
+    // Gate 15 — Emit start event
+    if (streaming) {
+      streaming.onEvent('start', { correlationId, intent: intent.normalized, intentStatus: intent.status });
+    }
+
     // Ambiguity / unknown — never fabricated.
     if (intent.status !== 'resolved') {
       const explanation = buildExplanation({
@@ -185,12 +204,15 @@ export class CommandPipeline {
         risk: 'low',
         outcome: 'blocked',
       });
-      await this.store.recordAudit({
+      await this.safeAudit({
         actorType: ctx.actorType, actorId: ctx.actorId, action: `command.${intent.status}`,
         projectId: null, environmentId: null, resourceType: intent.resource, resourceId: intent.project,
         authorizationResult: null, correlationId, taskId: null,
         metadata: { missing: intent.missing, normalized: redactText(intent.normalized) },
       });
+      if (streaming) {
+        streaming.onEvent('error', { error: explanation.why, code: intent.status });
+      }
       return this.result('unknown', intent, null, 'development', 'low', null, null, null, null, correlationId, explanation);
     }
 
@@ -207,12 +229,15 @@ export class CommandPipeline {
           risk: 'low',
           outcome: 'blocked',
         });
-        await this.store.recordAudit({
+        await this.safeAudit({
           actorType: ctx.actorType, actorId: ctx.actorId, action: 'command.unknown_project',
           projectId: null, environmentId: null, resourceType: intent.resource, resourceId: intent.project,
           authorizationResult: null, correlationId, taskId: null,
           metadata: { requestedProject: intent.project },
         });
+        if (streaming) {
+          streaming.onEvent('error', { error: explanation.why, code: 'unknown_project' });
+        }
         return this.result('unknown_project', intent, null, 'development', 'low', null, null, null, null, correlationId, explanation);
       }
       projectId = project.id;
@@ -297,12 +322,15 @@ export class CommandPipeline {
           outcome: 'denied',
         });
         await this.recordDecision(ctx, projectId, intent, 'DENY_SECURITY', 'security_guardian', authority, autonomy, risk, task?.id ?? null, 'denied');
-        await this.store.recordAudit({
+        await this.safeAudit({
           actorType: ctx.actorType, actorId: ctx.actorId, action: 'security.guardian_denied',
           projectId, environmentId: null, resourceType: intent.resource, resourceId: intent.project,
           authorizationResult: 'deny', correlationId, taskId: task?.id ?? null,
           metadata: { decision: securityResult.decision, reason: redactText(securityResult.reason), rules: securityResult.rules },
         });
+        if (streaming) {
+          streaming.onEvent('error', { error: securityResult.reason, code: 'security_denied' });
+        }
         return this.result('denied', intent, projectInfo, environment, risk, authority, autonomy, null, task, correlationId, explanation);
       }
       // Upgrade-only reconciliation: require_approval > notify > auto.
@@ -313,7 +341,7 @@ export class CommandPipeline {
       }
     }
 
-    await this.store.recordAudit({
+    await this.safeAudit({
       actorType: ctx.actorType, actorId: ctx.actorId, action: 'authority.decision',
       projectId, environmentId: null, resourceType: intent.resource, resourceId: intent.project,
       authorizationResult: autonomy.selected, correlationId, taskId: null,
@@ -343,6 +371,9 @@ export class CommandPipeline {
         outcome: 'denied',
       });
       await this.recordDecision(ctx, projectId, intent, actionType, 'DENY', authority, autonomy, risk, task?.id ?? null, 'denied');
+      if (streaming) {
+        streaming.onEvent('error', { error: explanation.why, code: 'denied' });
+      }
       return this.result('denied', intent, projectInfo, environment, risk, authority, autonomy, null, task, correlationId, explanation);
     }
 
@@ -356,6 +387,9 @@ export class CommandPipeline {
           risk,
           outcome: 'blocked',
         });
+        if (streaming) {
+          streaming.onEvent('error', { error: explanation.why, code: 'blocked' });
+        }
         return this.result('blocked', intent, projectInfo, environment, risk, authority, autonomy, null, null, correlationId, explanation);
       }
       const task = await this.createTask(ctx, intent, projectId, environment, risk, authority, autonomy, 'needs_approval', correlationId);
@@ -369,6 +403,9 @@ export class CommandPipeline {
         authorityLevel: autonomy.selected,
       });
       if (err) {
+        if (streaming) {
+          streaming.onEvent('error', { error: err, code: 'blocked' });
+        }
         return this.result('blocked', intent, projectInfo, environment, risk, authority, autonomy, null, task, correlationId,
           buildExplanation({ decision: 'Blocked.', why: err, risk, outcome: 'blocked' }));
       }
@@ -380,7 +417,7 @@ export class CommandPipeline {
         authorityLevel: autonomy.selected,
         requestedBy: ctx.actorId,
       });
-      await this.store.recordAudit({
+      await this.safeAudit({
         actorType: ctx.actorType, actorId: ctx.actorId, action: 'approval.requested',
         projectId, environmentId: null, resourceType: intent.resource, resourceId: intent.project,
         authorizationResult: 'require_approval', correlationId, taskId: task.id,
@@ -394,6 +431,9 @@ export class CommandPipeline {
         risk,
         outcome: 'waiting_approval',
       });
+      if (streaming) {
+        streaming.onEvent('approval', { approvalId: approval.id, task: task.title, risk });
+      }
       return this.result('waiting_approval', intent, projectInfo, environment, risk, authority, autonomy, approval.id, task, correlationId, explanation);
     }
 
@@ -406,16 +446,19 @@ export class CommandPipeline {
         risk,
         outcome: 'blocked',
       });
+      if (streaming) {
+        streaming.onEvent('error', { error: explanation.why, code: 'blocked' });
+      }
       return this.result('blocked', intent, projectInfo, environment, risk, authority, autonomy, null, null, correlationId, explanation);
     }
 
     // Gate 8 — Multi-step orchestration: detect and delegate.
     if (detectMultiStepCommand(intent.normalized)) {
-      return this.runOrchestration(ctx, intent, projectId, projectInfo, environment, risk, authority, autonomy, correlationId, conversationHistory);
+      return this.runOrchestration(ctx, intent, projectId, projectInfo, environment, risk, authority, autonomy, correlationId, conversationHistory, streaming);
     }
 
     const task = await this.createTask(ctx, intent, projectId, environment, risk, authority, autonomy, 'queued', correlationId);
-    return this.executeTask(ctx, intent, task, projectInfo, environment, risk, authority, autonomy, correlationId, conversationHistory);
+    return this.executeTask(ctx, intent, task, projectInfo, environment, risk, authority, autonomy, correlationId, conversationHistory, streaming);
   }
 
   private async executeTask(
@@ -429,6 +472,7 @@ export class CommandPipeline {
     autonomy: AutonomyDecision,
     correlationId: string,
     conversationHistory?: ConversationMessage[],
+    streaming?: StreamingCallbacksOptional,
   ): Promise<PipelineResult> {
     const started = await this.store.patchTask(ctx.ownerId, task.id, { status: 'running', startedAt: new Date().toISOString() });
     const run = await this.store.createTaskRun(ctx.ownerId, {
@@ -444,7 +488,7 @@ export class CommandPipeline {
       outcome = { ok: false, error: String(e), reason: 'execution-threw' };
     }
 
-    await this.store.recordAudit({
+    await this.safeAudit({
       actorType: ctx.actorType, actorId: ctx.actorId, action: 'task.run',
       projectId: task.projectId, environmentId: null, resourceType: 'task', resourceId: task.id,
       authorizationResult: autonomy.selected, correlationId, taskId: task.id,
@@ -461,7 +505,7 @@ export class CommandPipeline {
         cost: outcome.cost ?? 0,
       });
       if (outcome.cost && outcome.cost > 0) {
-        await this.store.recordCost({
+        await this.safeCost({
           ownerId: ctx.ownerId,
           projectId: task.projectId,
           taskId: task.id,
@@ -483,7 +527,7 @@ export class CommandPipeline {
         error: null,
         completedAt: new Date().toISOString(),
       });
-      await this.store.recordAudit({
+      await this.safeAudit({
         actorType: ctx.actorType, actorId: ctx.actorId, action: 'task.completed',
         projectId: task.projectId, environmentId: null, resourceType: 'task', resourceId: task.id,
         authorizationResult: autonomy.selected, correlationId, taskId: task.id,
@@ -498,7 +542,8 @@ export class CommandPipeline {
         risk,
         outcome: 'executed',
       });
-      return this.result('executed', intent, projectInfo, environment, risk, authority, autonomy, null, done, correlationId, explanation);
+      const result = this.result('executed', intent, projectInfo, environment, risk, authority, autonomy, null, done, correlationId, explanation, outcome.toolMessages);
+      return result;
     }
 
     // Failure path — bounded retries.
@@ -510,6 +555,9 @@ export class CommandPipeline {
     });
     const current = await this.store.getTask(ctx.ownerId, task.id);
     if (!current) {
+      if (streaming) {
+        streaming.onEvent('error', { error: 'Task state lost during failure handling.', code: 'state_lost' });
+      }
       return this.result('failed', intent, projectInfo, environment, risk, authority, autonomy, null, task, correlationId,
         buildExplanation({ decision: 'Failed.', why: 'Task state lost during failure handling.', risk, outcome: 'failed' }));
     }
@@ -520,7 +568,7 @@ export class CommandPipeline {
         error: handled.task.error,
         attempts: handled.task.attempts,
       });
-      await this.store.recordAudit({
+      await this.safeAudit({
         actorType: ctx.actorType, actorId: ctx.actorId,
         action: handled.stopped ? 'task.failed_final' : 'task.failed_retry_pending',
         projectId: task.projectId, environmentId: null, resourceType: 'task', resourceId: task.id,
@@ -537,9 +585,15 @@ export class CommandPipeline {
         risk,
         outcome: handled.stopped ? 'failed' : 'retry_pending',
       });
+      if (streaming) {
+        streaming.onEvent('error', { error: explanation.why, code: handled.stopped ? 'failed_final' : 'retry_pending' });
+      }
       return this.result(handled.stopped ? 'failed' : 'retry_pending', intent, projectInfo, environment, risk, authority, autonomy, null, handled.task, correlationId, explanation);
     }
 
+    if (streaming) {
+      streaming.onEvent('error', { error: handled.error ?? 'execution failed', code: 'failed' });
+    }
     return this.result('failed', intent, projectInfo, environment, risk, authority, autonomy, null, task, correlationId,
       buildExplanation({ decision: 'Failed.', why: handled.error ?? 'execution failed', risk, outcome: 'failed' }));
   }
@@ -555,6 +609,7 @@ export class CommandPipeline {
     autonomy: AutonomyDecision,
     correlationId: string,
     conversationHistory?: ConversationMessage[],
+    streaming?: StreamingCallbacksOptional,
   ): Promise<PipelineResult> {
     // Create the task (same as single-step)
     const task = await this.createTask(ctx, intent, projectId, environment, risk, authority, autonomy, 'queued', correlationId);
@@ -575,6 +630,9 @@ export class CommandPipeline {
         error: { message: 'Could not generate orchestration plan.' },
         completedAt: new Date().toISOString(),
       });
+      if (streaming) {
+        streaming.onEvent('error', { error: 'Could not generate orchestration plan.', code: 'plan_failed' });
+      }
       return this.result('failed', intent, projectInfo, environment, risk, authority, autonomy, null, task, correlationId,
         buildExplanation({ decision: 'Failed.', why: 'Could not generate orchestration plan.', risk, outcome: 'failed' }));
     }
@@ -589,7 +647,7 @@ export class CommandPipeline {
     );
 
     // Audit orchestration start
-    await this.store.recordAudit({
+    await this.safeAudit({
       actorType: ctx.actorType, actorId: ctx.actorId, action: 'orchestration.started',
       projectId, environmentId: null, resourceType: 'orchestration', resourceId: plan.id,
       authorizationResult: autonomy.selected, correlationId, taskId: task.id,
@@ -622,7 +680,7 @@ export class CommandPipeline {
     // Record planning cost from model call
     const planningCost = planStepsResult.cost ?? 0;
     if (planningCost > 0) {
-      await this.store.recordCost({
+      await this.safeCost({
         ownerId: ctx.ownerId,
         projectId: task.projectId,
         taskId: task.id,
@@ -639,7 +697,7 @@ export class CommandPipeline {
       });
     }
 
-    await this.store.recordAudit({
+    await this.safeAudit({
       actorType: ctx.actorType, actorId: ctx.actorId, action: 'orchestration.completed',
       projectId, environmentId: null, resourceType: 'orchestration', resourceId: plan.id,
       authorizationResult: autonomy.selected, correlationId, taskId: task.id,
@@ -661,7 +719,7 @@ export class CommandPipeline {
         error: null,
         completedAt: new Date().toISOString(),
       });
-      await this.store.recordAudit({
+      await this.safeAudit({
         actorType: ctx.actorType, actorId: ctx.actorId, action: 'task.completed',
         projectId: task.projectId, environmentId: null, resourceType: 'task', resourceId: task.id,
         authorizationResult: autonomy.selected, correlationId, taskId: task.id,
@@ -676,7 +734,8 @@ export class CommandPipeline {
         risk,
         outcome: 'executed',
       });
-      return this.result('executed', intent, projectInfo, environment, risk, authority, autonomy, null, done, correlationId, explanation);
+      const result = this.result('executed', intent, projectInfo, environment, risk, authority, autonomy, null, done, correlationId, explanation);
+      return result;
     }
 
     // Failure path
@@ -689,6 +748,9 @@ export class CommandPipeline {
     });
     const current = await this.store.getTask(ctx.ownerId, task.id);
     if (!current) {
+      if (streaming) {
+        streaming.onEvent('error', { error: 'Task state lost during orchestration failure.', code: 'state_lost' });
+      }
       return this.result('failed', intent, projectInfo, environment, risk, authority, autonomy, null, task, correlationId,
         buildExplanation({ decision: 'Failed.', why: 'Task state lost during orchestration failure.', risk, outcome: 'failed' }));
     }
@@ -699,7 +761,7 @@ export class CommandPipeline {
         error: handled.task.error,
         attempts: handled.task.attempts,
       });
-      await this.store.recordAudit({
+      await this.safeAudit({
         actorType: ctx.actorType, actorId: ctx.actorId,
         action: handled.stopped ? 'orchestration.failed_final' : 'orchestration.failed_retry_pending',
         projectId: task.projectId, environmentId: null, resourceType: 'orchestration', resourceId: plan.id,
@@ -716,9 +778,15 @@ export class CommandPipeline {
         risk,
         outcome: handled.stopped ? 'failed' : 'retry_pending',
       });
+      if (streaming) {
+        streaming.onEvent('error', { error: explanation.why, code: handled.stopped ? 'failed_final' : 'retry_pending' });
+      }
       return this.result(handled.stopped ? 'failed' : 'retry_pending', intent, projectInfo, environment, risk, authority, autonomy, null, handled.task, correlationId, explanation);
     }
 
+    if (streaming) {
+      streaming.onEvent('error', { error: handled.error ?? errorMsg, code: 'failed' });
+    }
     return this.result('failed', intent, projectInfo, environment, risk, authority, autonomy, null, task, correlationId,
       buildExplanation({ decision: 'Failed.', why: handled.error ?? errorMsg, risk, outcome: 'failed' }));
   }
@@ -748,7 +816,7 @@ export class CommandPipeline {
       correlationId,
       createdBy: ctx.actorId,
     });
-    await this.store.recordAudit({
+    await this.safeAudit({
       actorType: ctx.actorType, actorId: ctx.actorId, action: 'task.created',
       projectId, environmentId: null, resourceType: 'task', resourceId: task.id,
       authorizationResult: authority.outcome, correlationId, taskId: task.id,
@@ -782,6 +850,24 @@ export class CommandPipeline {
       approvedBy: autonomy.selected === 'deny' || autonomy.selected === 'require_approval' ? ctx.actorId : null,
       outcome: decisionOutcome,
     });
+  }
+
+  // Gate 21: Failure-isolated audit write. Does NOT throw on persistence failure.
+  private async safeAudit(event: Parameters<Store['recordAudit']>[0]): Promise<void> {
+    try {
+      await this.store.recordAudit(event);
+    } catch (e) {
+      console.warn(`[Gate 21] Audit persistence failed for action="${event.action}": ${e}`);
+    }
+  }
+
+  // Gate 21: Failure-isolated cost write. Does NOT throw on persistence failure.
+  private async safeCost(event: Parameters<Store['recordCost']>[0]): Promise<void> {
+    try {
+      await this.store.recordCost(event);
+    } catch (e) {
+      console.warn(`[Gate 21] Cost persistence failed for taskId="${event.taskId}": ${e}`);
+    }
   }
 
   private actionTypeFor(verb: ActionVerb, resource: string | null): string {
@@ -820,10 +906,11 @@ export class CommandPipeline {
     task: TaskRecord | null,
     correlationId: string,
     explanation: Explanation,
+    toolMessages?: Array<{ role: 'tool'; content: string; tool_call_id: string; name: string }>,
   ): PipelineResult {
     if (!isCompleteExplanation(explanation)) {
       throw new Error('pipeline produced an incomplete explanation');
     }
-    return { outcome, intent, project, environment, risk, authority, autonomy, approvalId, task, correlationId, explanation };
+    return { outcome, intent, project, environment, risk, authority, autonomy, approvalId, task, correlationId, explanation, toolMessages };
   }
 }

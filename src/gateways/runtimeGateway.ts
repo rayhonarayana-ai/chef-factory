@@ -10,6 +10,8 @@ export interface RuntimeExecutionRequest {
   projectPath?: string | null;
   environment: string;
   timeoutMs?: number;
+  /** Gate 22: AbortSignal for execution timeout propagation. */
+  signal?: AbortSignal;
 }
 
 export interface RuntimeExecutionResult {

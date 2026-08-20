@@ -132,7 +132,6 @@ export class AnomalyDetector {
 // note() remains synchronous for backward compatibility.
 // FAIL-CLOSED: persistence failure does NOT disable anomaly detection.
 export class PersistentAnomalyDetector extends AnomalyDetector {
-  private persistenceFailureLogged = false;
 
   constructor(
     thresholds: AnomalyThresholds = DEFAULT_ANOMALY_THRESHOLDS,
@@ -161,14 +160,11 @@ export class PersistentAnomalyDetector extends AnomalyDetector {
         }
       }
     } catch {
-      if (!this.persistenceFailureLogged) {
-        console.error('[Gate 14] Anomaly persistence load failed — using in-memory fallback');
-        this.persistenceFailureLogged = true;
-      }
+      console.warn('[Gate 14] Anomaly persistence load failed — using in-memory fallback');
     }
   }
 
-  /** Save current counters and decay state to persistence (best-effort). */
+  /** Save current counters and decay state to persistence (observable failure). */
   async saveState(ownerId: string): Promise<void> {
     if (!this.persistence) return;
     try {
@@ -178,10 +174,7 @@ export class PersistentAnomalyDetector extends AnomalyDetector {
       for (const [k, v] of this.lastDecay) decayObj[k] = v;
       await this.persistence.save(ownerId, countersObj, decayObj);
     } catch {
-      if (!this.persistenceFailureLogged) {
-        console.error('[Gate 14] Anomaly persistence save failed — using in-memory fallback');
-        this.persistenceFailureLogged = true;
-      }
+      console.warn('[Gate 14] Anomaly persistence save failed — using in-memory fallback');
     }
   }
 
@@ -189,7 +182,7 @@ export class PersistentAnomalyDetector extends AnomalyDetector {
   async notePersisted(ownerId: string, kind: keyof AnomalyCounters): Promise<AnomalySignal | null> {
     await this.loadState(ownerId);
     const signal = this.note(kind);
-    void this.saveState(ownerId);
+    this.saveState(ownerId).catch(() => { console.warn('[Gate 17] Anomaly persistence fire-and-forget failed'); });
     return signal;
   }
 }

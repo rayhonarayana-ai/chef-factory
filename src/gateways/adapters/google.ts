@@ -60,6 +60,7 @@ export function createGoogleAdapter(config: ProviderConfig = {}): ProviderAdapte
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
+          signal: request.signal,
         },
       );
       if (!res.ok) throw new Error(`google request failed: HTTP ${res.status}`);
