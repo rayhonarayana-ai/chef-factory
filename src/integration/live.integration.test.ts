@@ -192,6 +192,36 @@ describe.skipIf(!enabled)('Live integration (real Supabase Postgres, transaction
     expect(policy['deny:execute']).toBe('allow');
   });
 
+  it('Gate 23 — title/priority/description persist through SupabaseStore.patchTask', async () => {
+    const s = makeTransactionalStore();
+    handles.push(s);
+
+    const project = await s.store.createProject(s.owner, { name: 'IT G23', slug: 'it-g23' });
+    const task = await s.store.createTask(s.owner, { projectId: project.id, title: 'original title', riskLevel: 'medium', correlationId: crypto.randomUUID() });
+    expect(task.title).toBe('original title');
+    expect(task.priority).toBe('medium');
+    expect(task.description).toBeNull();
+
+    const patched1 = await s.store.patchTask(s.owner, task.id, { title: 'updated title' });
+    expect(patched1.title).toBe('updated title');
+    expect(patched1.priority).toBe('medium');
+
+    const patched2 = await s.store.patchTask(s.owner, task.id, { priority: 'critical' });
+    expect(patched2.title).toBe('updated title');
+    expect(patched2.priority).toBe('critical');
+
+    const patched3 = await s.store.patchTask(s.owner, task.id, { description: 'a new description' });
+    expect(patched3.description).toBe('a new description');
+
+    const patched4 = await s.store.patchTask(s.owner, task.id, { description: null });
+    expect(patched4.description).toBeNull();
+
+    const patched5 = await s.store.patchTask(s.owner, task.id, { title: 'final', priority: 'low', description: 'combined' });
+    expect(patched5.title).toBe('final');
+    expect(patched5.priority).toBe('low');
+    expect(patched5.description).toBe('combined');
+  });
+
   it('budget report rolls costs per month without inventing numbers', async () => {
     const s = makeTransactionalStore();
     handles.push(s);

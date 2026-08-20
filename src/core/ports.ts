@@ -212,9 +212,9 @@ export interface Store {
   // ————— Gate 3 — Conversation persistence —————
   createConversation(ownerId: string, data: { projectId?: string | null; title?: string | null }): Promise<ConversationRecord>;
   getConversation(ownerId: string, conversationId: string): Promise<ConversationRecord | null>;
-  listConversations(ownerId: string, filter?: { status?: string; limit?: number; offset?: number }): Promise<ConversationRecord[]>;
+  listConversations(ownerId: string, filter?: { status?: 'active' | 'archived'; limit?: number; offset?: number }): Promise<ConversationRecord[]>;
   archiveConversation(ownerId: string, conversationId: string): Promise<boolean>;
-  appendMessage(ownerId: string, input: { conversationId: string; role: string; content: string; toolCalls?: unknown; toolCallId?: string | null; name?: string | null; tokenCount?: number | null }): Promise<ConversationMessage>;
+  appendMessage(ownerId: string, input: { conversationId: string; role: 'user' | 'assistant' | 'tool' | 'system'; content: string; toolCalls?: unknown; toolCallId?: string | null; name?: string | null; tokenCount?: number | null }): Promise<ConversationMessage>;
   loadHistory(ownerId: string, conversationId: string, limit?: number): Promise<ConversationMessage[]>;
 
   // ————— Gate 19 — Audit query (replaces direct getPool bypass) —————

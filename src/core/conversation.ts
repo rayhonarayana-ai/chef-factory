@@ -60,7 +60,7 @@ export class ConversationService {
     return this.store.getConversation(ownerId, conversationId);
   }
 
-  async listConversations(ownerId: string, opts?: { status?: string; limit?: number; offset?: number }): Promise<ConversationRecord[]> {
+  async listConversations(ownerId: string, opts?: { status?: 'active' | 'archived'; limit?: number; offset?: number }): Promise<ConversationRecord[]> {
     return this.store.listConversations(ownerId, opts);
   }
 

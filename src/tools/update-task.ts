@@ -5,11 +5,8 @@
 
 import type { ToolHandlerInput, ToolHandlerResult } from './types.js';
 import { canTransition, TERMINAL_TASK_STATUSES } from '../core/taskEngine.js';
-import type { TaskStatus } from '../core/types.js';
-
-const VALID_STATUSES = new Set<TaskStatus>([
-  'created', 'queued', 'running', 'completed', 'failed', 'cancelled', 'paused', 'needs_approval',
-]);
+import { isTaskStatus, isPriority } from '../core/runtimeGuard.js';
+import type { TaskPatch } from '../core/ports.js';
 
 export async function updateTaskHandler(input: ToolHandlerInput): Promise<ToolHandlerResult> {
   const { ownerId, args } = input;
@@ -22,16 +19,16 @@ export async function updateTaskHandler(input: ToolHandlerInput): Promise<ToolHa
     const current = await input.store.getTask(ownerId, taskId);
     if (!current) return { success: false, error: 'task not found or access denied' };
 
-    const patch: Record<string, unknown> = {};
+    const patch: TaskPatch = {};
 
     if (typeof args.title === 'string' && args.title.trim()) {
       patch.title = args.title.trim();
     }
     if (typeof args.status === 'string') {
-      const newStatus = args.status as TaskStatus;
-      if (!VALID_STATUSES.has(newStatus)) {
-        return { success: false, error: `invalid status: ${newStatus}` };
+      if (!isTaskStatus(args.status)) {
+        return { success: false, error: `invalid status: ${args.status}` };
       }
+      const newStatus = args.status;
       if (TERMINAL_TASK_STATUSES.has(current.status)) {
         return { success: false, error: `cannot update task in terminal status: ${current.status}` };
       }
@@ -41,6 +38,9 @@ export async function updateTaskHandler(input: ToolHandlerInput): Promise<ToolHa
       patch.status = newStatus;
     }
     if (typeof args.priority === 'string') {
+      if (!isPriority(args.priority)) {
+        return { success: false, error: `invalid priority: ${args.priority}. Must be one of: low, medium, high, critical` };
+      }
       patch.priority = args.priority;
     }
     if (typeof args.description === 'string') {
@@ -49,7 +49,7 @@ export async function updateTaskHandler(input: ToolHandlerInput): Promise<ToolHa
 
     if (Object.keys(patch).length === 0) return { success: false, error: 'no fields to update' };
 
-    const updated = await input.store.patchTask(ownerId, taskId, patch as Parameters<typeof input.store.patchTask>[2]);
+    const updated = await input.store.patchTask(ownerId, taskId, patch);
     return {
       success: true,
       data: {

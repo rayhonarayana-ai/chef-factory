@@ -1,10 +1,10 @@
 # CHEF FACTORY — todo.md
 
 > Updated: 2026-08-20
-> Gate: 4 — **PASS (FROZEN)** | Gate 5 — **PASS (257/257)** | Gate 6 — **PASS (343/343)** | Gate 7 — **PASS (370/370)** | Gate 8 — **PASS (400/400) FROZEN** | Gate 9 — **PASS (427/427)** | Gate 10 — **PASS (462/462)** | Gate 11 — **PASS (515/515)** | Gate 12 — **PASS (577/577)** | Gate 13 — **PASS (599/599)** | Gate 14 — **PASS (624/624) FROZEN** | Gate 15 — **PASS (687/687)** | Gate 16 — **PASS (699/699) FROZEN** | Gate 17 — **PASS (716/716) PARTIAL** | Gate 18 — **PASS (749/749)** | Gate 19 — **PASS (845/846)** | Gate 20 — **PASS (867/867)** | Gate 21 — **PASS (901/901)** | Gate 22 — **PASS (913/913)** | Gate 23 — **PASS (931/931)**
+> Gate: 4 — **PASS (FROZEN)** | Gate 5 — **PASS (257/257)** | Gate 6 — **PASS (343/343)** | Gate 7 — **PASS (370/370)** | Gate 8 — **PASS (400/400) FROZEN** | Gate 9 — **PASS (427/427)** | Gate 10 — **PASS (462/462)** | Gate 11 — **PASS (515/515)** | Gate 12 — **PASS (577/577)** | Gate 13 — **PASS (599/599)** | Gate 14 — **PASS (624/624) FROZEN** | Gate 15 — **PASS (687/687)** | Gate 16 — **PASS (699/699) FROZEN** | Gate 17 — **PASS (716/716) PARTIAL** | Gate 18 — **PASS (749/749)** | Gate 19 — **PASS (845/846)** | Gate 20 — **PASS (867/867)** | Gate 21 — **PASS (901/901)** | Gate 22 — **PASS (913/913)** | Gate 23 — **PASS (931/931)** | Gate 24 — **PASS (977/977)**
 
 ## Current Phase
-GATE 23 — **PASS** (2026-08-20): OD41 (update_task Silent Data Loss) implemented. TaskPatch interface corrected to include title, priority, description. SupabaseStore.patchTask field mapping corrected. MemoryStore parity confirmed. 18 new tests (6 repro + 12 contract). 931/931 PASS. tsc CLEAN. Build CLEAN. Frozen baseline updated: 913→931.
+GATE 24 — **PASS** (2026-08-20): Runtime Input Contract Hardening. Created `runtimeGuard.ts` with 11 validation helpers. Fixed unsafe casts in update-task (priority), create-task (priority), list-tasks (status), handlers.ts (task status, approval status, eventIds, conversation status), and ports.ts Store interface (role/status union types). 46 new tests. 977/977 PASS. 7 SKIPPED. tsc CLEAN. Build CLEAN. Frozen baseline updated: 931→977.
 
 ## Gate 3 Status (FROZEN BASELINE)
 

@@ -771,7 +771,7 @@ export class SupabaseStore implements Store {
     };
   }
 
-  async listConversations(ownerId: string, filter?: { status?: string; limit?: number; offset?: number }): Promise<import('../core/conversation.js').ConversationRecord[]> {
+  async listConversations(ownerId: string, filter?: { status?: 'active' | 'archived'; limit?: number; offset?: number }): Promise<import('../core/conversation.js').ConversationRecord[]> {
     const limit = filter?.limit ?? 50;
     const offset = filter?.offset ?? 0;
     const statusFilter = filter?.status ?? 'active';
@@ -803,7 +803,7 @@ export class SupabaseStore implements Store {
     return (res.rowCount ?? 0) > 0;
   }
 
-  async appendMessage(ownerId: string, input: { conversationId: string; role: string; content: string; toolCalls?: unknown; toolCallId?: string | null; name?: string | null; tokenCount?: number | null }): Promise<import('../core/conversation.js').ConversationMessage> {
+  async appendMessage(ownerId: string, input: { conversationId: string; role: 'user' | 'assistant' | 'tool' | 'system'; content: string; toolCalls?: unknown; toolCallId?: string | null; name?: string | null; tokenCount?: number | null }): Promise<import('../core/conversation.js').ConversationMessage> {
     const res = await this.q<{ id: string; conversation_id: string; owner_id: string; role: string; content: string; tool_calls: unknown; tool_call_id: string | null; name: string | null; token_count: number | null; created_at: string }>(
       `INSERT INTO public.conversation_messages
        (conversation_id, owner_id, role, content, tool_calls, tool_call_id, name, token_count)

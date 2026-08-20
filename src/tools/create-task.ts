@@ -3,6 +3,7 @@
 // Gate 19: Uses Store port instead of direct getPool() bypass.
 
 import type { ToolHandlerInput, ToolHandlerResult } from './types.js';
+import { isPriority } from '../core/runtimeGuard.js';
 
 export async function createTaskHandler(input: ToolHandlerInput): Promise<ToolHandlerResult> {
   const { ownerId, args } = input;
@@ -12,7 +13,11 @@ export async function createTaskHandler(input: ToolHandlerInput): Promise<ToolHa
   if (!title) return { success: false, error: 'title is required' };
 
   const description = typeof args.description === 'string' ? args.description : undefined;
-  const priority = typeof args.priority === 'string' ? args.priority : 'medium';
+  const priorityRaw = typeof args.priority === 'string' ? args.priority : 'medium';
+  if (!isPriority(priorityRaw)) {
+    return { success: false, error: `invalid priority: ${priorityRaw}. Must be one of: low, medium, high, critical` };
+  }
+  const priority = priorityRaw;
 
   if (!input.store) return { success: false, error: 'store not available' };
 
@@ -24,7 +29,7 @@ export async function createTaskHandler(input: ToolHandlerInput): Promise<ToolHa
       projectId,
       title,
       description: description ?? undefined,
-      priority: priority as 'low' | 'medium' | 'high' | 'critical',
+      priority,
     });
     return {
       success: true,

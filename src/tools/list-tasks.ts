@@ -3,20 +3,27 @@
 // Gate 19: Uses Store port instead of direct getPool() bypass.
 
 import type { ToolHandlerInput, ToolHandlerResult } from './types.js';
+import { isTaskStatus } from '../core/runtimeGuard.js';
 
 export async function listTasksHandler(input: ToolHandlerInput): Promise<ToolHandlerResult> {
   const { ownerId, args } = input;
   const projectId = typeof args.project_id === 'string' ? args.project_id : '';
   if (!projectId) return { success: false, error: 'project_id is required' };
 
-  const status = typeof args.status === 'string' ? args.status : undefined;
+  let status: 'created' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'paused' | 'needs_approval' | undefined;
+  if (typeof args.status === 'string') {
+    if (!isTaskStatus(args.status)) {
+      return { success: false, error: `invalid status: ${args.status}` };
+    }
+    status = args.status;
+  }
 
   if (!input.store) return { success: false, error: 'store not available' };
 
   try {
     const tasks = await input.store.listTasks(ownerId, {
       projectId,
-      status: status as 'created' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'paused' | 'needs_approval' | undefined,
+      status,
     });
     return {
       success: true,

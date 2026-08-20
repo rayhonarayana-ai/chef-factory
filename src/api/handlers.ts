@@ -10,6 +10,7 @@ import { resolveApproval, validateNewApproval, isExpired } from '../core/approva
 import { transitionTask } from '../core/taskEngine.js';
 import { validatePreference } from '../core/pos.js';
 import { passportSummary } from '../core/passport.js';
+import { isTaskStatus, isApprovalStatus, isStringArray } from '../core/runtimeGuard.js';
 import type { ApprovalStatus, TaskStatus } from '../core/types.js';
 import type { ExecutionRunner } from '../core/pipeline.js';
 import type { AuthService, SessionOwner } from './auth.js';
@@ -118,7 +119,7 @@ export class Api {
 
       // ----- Gate 3: Conversation endpoints -----
       case 'GET /api/conversations': {
-        const status = typeof json.status === 'string' ? json.status : 'active';
+        const status = typeof json.status === 'string' && (json.status === 'active' || json.status === 'archived') ? json.status as 'active' | 'archived' : 'active';
         const limit = typeof json.limit === 'number' ? Math.min(100, Math.max(1, json.limit)) : 50;
         const offset = typeof json.offset === 'number' ? Math.max(0, json.offset) : 0;
         const conversations = await this.conversations.listConversations(owner.id, { status, limit, offset });
@@ -183,7 +184,7 @@ export class Api {
       case 'GET /api/tasks': {
         const tasks = await this.store.listTasks(owner.id, {
           projectId: typeof json.projectId === 'string' ? json.projectId : undefined,
-          status: typeof json.status === 'string' ? (json.status as TaskStatus) : undefined,
+          status: typeof json.status === 'string' && isTaskStatus(json.status) ? json.status : undefined,
         });
         return this.ok({ tasks });
       }
@@ -192,7 +193,7 @@ export class Api {
       case 'GET /api/approvals': {
         const approvals = await this.store.listApprovals(owner.id, {
           projectId: typeof json.projectId === 'string' ? json.projectId : undefined,
-          status: typeof json.status === 'string' ? (json.status as ApprovalStatus) : undefined,
+          status: typeof json.status === 'string' && isApprovalStatus(json.status) ? json.status : undefined,
         });
         return this.ok({ approvals });
       }
@@ -340,7 +341,7 @@ export class Api {
         const incident = await this.store.createIncident(owner.id, {
           title,
           description: typeof json.description === 'string' ? json.description : undefined,
-          eventIds: Array.isArray(json.eventIds) ? (json.eventIds as string[]) : [],
+          eventIds: Array.isArray(json.eventIds) && isStringArray(json.eventIds) ? json.eventIds : [],
           openedBy: owner.id,
         });
         return this.ok({ incident });

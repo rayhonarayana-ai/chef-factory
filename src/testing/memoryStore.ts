@@ -314,7 +314,7 @@ export class MemoryStore implements Store {
     return this.conversations.find((c) => c.ownerId === ownerId && c.id === conversationId) ?? null;
   }
 
-  async listConversations(ownerId: string, filter?: { status?: string; limit?: number; offset?: number }): Promise<ConversationRecord[]> {
+  async listConversations(ownerId: string, filter?: { status?: 'active' | 'archived'; limit?: number; offset?: number }): Promise<ConversationRecord[]> {
     const statusFilter = filter?.status ?? 'active';
     const limit = filter?.limit ?? 50;
     const offset = filter?.offset ?? 0;
@@ -332,12 +332,12 @@ export class MemoryStore implements Store {
     return true;
   }
 
-  async appendMessage(ownerId: string, input: { conversationId: string; role: string; content: string; toolCalls?: unknown; toolCallId?: string | null; name?: string | null; tokenCount?: number | null }): Promise<ConversationMessage> {
+  async appendMessage(ownerId: string, input: { conversationId: string; role: 'user' | 'assistant' | 'tool' | 'system'; content: string; toolCalls?: unknown; toolCallId?: string | null; name?: string | null; tokenCount?: number | null }): Promise<ConversationMessage> {
     const msg: ConversationMessage = {
       id: uuid(),
       conversationId: input.conversationId,
       ownerId,
-      role: input.role as 'user' | 'assistant' | 'tool' | 'system',
+      role: input.role,
       content: input.content,
       toolCalls: input.toolCalls ?? null,
       toolCallId: input.toolCallId ?? null,
