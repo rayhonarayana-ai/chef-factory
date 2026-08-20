@@ -3,6 +3,9 @@
 // and in-memory fakes (tests) implement them.
 
 import type {
+  AgentRecord,
+  AgentDefinition,
+  AgentPatch,
   ApprovalRecord,
   AuditEvent,
   AutonomyDecision,
@@ -73,8 +76,11 @@ export interface AgentStats {
 }
 
 export interface Store {
-  // agents / permissions
-  listAgents(ownerId: string): Promise<Array<{ id: string; name: string; slug: string; role: string; status: string }>>;
+  // agents / permissions (Gate 25: full agent CRUD)
+  createAgent(ownerId: string, data: AgentDefinition): Promise<AgentRecord>;
+  getAgent(ownerId: string, agentId: string): Promise<AgentRecord | null>;
+  listAgents(ownerId: string): Promise<AgentRecord[]>;
+  patchAgent(ownerId: string, agentId: string, patch: AgentPatch): Promise<AgentRecord>;
   agentHasPermission(agentId: string, projectId: string | null, resourceType: string, permission: string): Promise<boolean>;
   agentStats(agentId: string): Promise<AgentStats>;
   // projects / passports

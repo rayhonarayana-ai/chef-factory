@@ -3,6 +3,7 @@
 
 import type { Store, TaskPatch, ApprovalPatch, AgentStats, BudgetReport } from '../core/ports.js';
 import type {
+  AgentRecord, AgentDefinition, AgentPatch,
   ApprovalRecord, AuditEvent, AutonomyDecision, CostEvent, DailyStatus, DecisionRecord,
   JsonObject, LessonInput, ModelInfo, PassportRecord, ProjectRecord, RecallItem,
   RuntimeInfo, TaskRecord, TaskRunRecord,
@@ -29,7 +30,8 @@ export class MemoryStore implements Store {
   prefs: { category: string; key: string; value: unknown; version: number; isActive: boolean }[] = [];
   decisions: DecisionRecord[] = [];
   autonomy: AutonomyDecision[] = [];
-  agents: Array<{ id: string; name: string; slug: string; role: string; status: string; permissions: Array<{ projectId: string | null; resourceType: string; permission: string }> }> = [];
+  agents: AgentRecord[] = [];
+  agentPermissions: Array<{ agentId: string; projectId: string | null; resourceType: string; permission: string }> = [];
   models: ModelInfo[] = [];
   runtimes: RuntimeInfo[] = [];
   securityEvents: SecurityEventRecord[] = [];
@@ -184,16 +186,59 @@ export class MemoryStore implements Store {
     return this.runtimes.slice();
   }
 
-  // agents / permissions
-  async listAgents(ownerId: string): Promise<Array<{ id: string; name: string; slug: string; role: string; status: string }>> {
-    void ownerId;
-    return this.agents.map(({ permissions: _permissions, ...rest }) => rest);
+  // agents / permissions (Gate 25: full CRUD)
+  async createAgent(ownerId: string, data: AgentDefinition): Promise<AgentRecord> {
+    const slug = data.slug ?? data.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+    if (this.agents.some((a) => a.ownerId === ownerId && a.slug === slug)) {
+      throw new Error(`agent slug "${slug}" already exists for this owner`);
+    }
+    const agent: AgentRecord = {
+      id: uuid(),
+      ownerId,
+      name: data.name,
+      slug,
+      role: data.role,
+      description: data.description ?? null,
+      capabilities: data.capabilities ?? [],
+      status: data.status ?? 'active',
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    this.agents.push(agent);
+    return agent;
   }
+
+  async getAgent(ownerId: string, agentId: string): Promise<AgentRecord | null> {
+    return this.agents.find((a) => a.ownerId === ownerId && a.id === agentId) ?? null;
+  }
+
+  async listAgents(ownerId: string): Promise<AgentRecord[]> {
+    return this.agents.filter((a) => a.ownerId === ownerId).map((a) => ({ ...a }));
+  }
+
+  async patchAgent(ownerId: string, agentId: string, patch: AgentPatch): Promise<AgentRecord> {
+    const idx = this.agents.findIndex((a) => a.ownerId === ownerId && a.id === agentId);
+    if (idx < 0) throw new Error('agent not found');
+    const entries = Object.entries(patch).filter(([, v]) => v !== undefined);
+    if (entries.length === 0) throw new Error('empty patch');
+    const current = this.agents[idx]!;
+    const next: AgentRecord = {
+      ...current,
+      ...Object.fromEntries(entries),
+      updatedAt: now(),
+    };
+    this.agents[idx] = next;
+    return { ...next };
+  }
+
   async agentHasPermission(agentId: string, projectId: string | null, resourceType: string, permission: string): Promise<boolean> {
     const a = this.agents.find((x) => x.id === agentId);
     if (!a || a.status !== 'active') return false;
-    return a.permissions.some((p) => p.resourceType === resourceType && p.permission === permission && (p.projectId === projectId || (p.projectId === null && projectId !== null)));
+    return this.agentPermissions.some(
+      (p) => p.agentId === agentId && p.resourceType === resourceType && p.permission === permission && (p.projectId === projectId || (p.projectId === null && projectId !== null)),
+    );
   }
+
   async agentStats(agentId: string): Promise<AgentStats> {
     void agentId;
     return { successRate: 0, historyCount: 0 };

@@ -549,9 +549,10 @@ describe('Gate 12 W3 — Security Boundary / Approval', () => {
   });
 
   it('W3-11: agent commands go through same security boundary as owner', async () => {
-    const agentCtx: ActorContext = { ownerId: OWNER_1, actorId: 'agent-1', actorType: 'agent', agentId: 'agent-1' };
     // Grant agent permission
-    store.agents.push({ id: 'agent-1', name: 'Test Agent', slug: 'test-agent', role: 'worker', status: 'active', permissions: [{ projectId: null, resourceType: 'task', permission: 'write' }] });
+    const createdAgent = await store.createAgent(OWNER_1, { name: 'Test Agent', slug: 'test-agent', role: 'worker', status: 'active' });
+    store.agentPermissions.push({ agentId: createdAgent.id, projectId: null, resourceType: 'task', permission: 'write' });
+    const agentCtx: ActorContext = { ownerId: OWNER_1, actorId: createdAgent.id, actorType: 'agent', agentId: createdAgent.id };
     const p = new CommandPipeline(store, simpleRunner(), makeGuardian());
     const r = await p.run(agentCtx, 'create task "Agent Task" in chef-hq');
     // Agent command should go through authority resolution

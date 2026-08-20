@@ -328,6 +328,43 @@ export interface DailyStatus {
   decisionsRequired: string[];
 }
 
+// ---------- Agents (Gate 25) ----------
+export const AGENT_STATUSES = ['active', 'paused', 'retired', 'suspended'] as const;
+export type AgentStatus = (typeof AGENT_STATUSES)[number];
+
+/** Persisted agent record — maps directly to public.agents table columns. */
+export interface AgentRecord {
+  id: string;
+  ownerId: string;
+  name: string;
+  slug: string;
+  role: string;
+  description: string | null;
+  capabilities: string[];
+  status: AgentStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Input contract for creating/defining a new agent. */
+export interface AgentDefinition {
+  name: string;
+  slug?: string;
+  role: string;
+  description?: string | null;
+  capabilities?: string[];
+  status?: AgentStatus;
+}
+
+/** Input contract for patching an existing agent. All fields optional. */
+export interface AgentPatch {
+  name?: string;
+  description?: string | null;
+  role?: string;
+  capabilities?: string[];
+  status?: AgentStatus;
+}
+
 // ---------- Memory ----------
 export interface RecallItem {
   id: string;

@@ -3,6 +3,9 @@
 // application layer on top of RLS). Append-only audit is enforced by the DB.
 
 import type {
+  AgentRecord,
+  AgentDefinition,
+  AgentPatch,
   ApprovalRecord,
   AuditEvent,
   AutonomyDecision,
@@ -481,12 +484,70 @@ export class SupabaseStore implements Store {
     );
   }
 
-  // ---------- agents / permissions ----------
-  async listAgents(ownerId: string): Promise<Array<{ id: string; name: string; slug: string; role: string; status: string }>> {
-    return this.q<{ id: string; name: string; slug: string; role: string; status: string }>(
-      `select id, name, slug, role, status from public.agents where owner_id = $1 order by name asc`,
+  // ---------- agents / permissions (Gate 25: full CRUD) ----------
+  private mapAgentRow(row: Record<string, unknown>): AgentRecord {
+    return {
+      id: row['id'] as string,
+      ownerId: row['owner_id'] as string,
+      name: row['name'] as string,
+      slug: row['slug'] as string,
+      role: row['role'] as string,
+      description: (row['description'] as string) ?? null,
+      capabilities: Array.isArray(row['capabilities']) ? row['capabilities'] as string[] : [],
+      status: row['status'] as AgentRecord['status'],
+      createdAt: row['created_at'] as string,
+      updatedAt: row['updated_at'] as string,
+    };
+  }
+
+  async createAgent(ownerId: string, data: AgentDefinition): Promise<AgentRecord> {
+    const slug = data.slug ?? data.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+    const rows = await this.q<Record<string, unknown>>(
+      `insert into public.agents (owner_id, name, slug, role, description, capabilities, status)
+       values ($1, $2, $3, $4, $5, $6, $7) returning *`,
+      [ownerId, data.name, slug, data.role, data.description ?? null, JSON.stringify(data.capabilities ?? []), data.status ?? 'active'],
+    );
+    return this.mapAgentRow(rows[0]!);
+  }
+
+  async getAgent(ownerId: string, agentId: string): Promise<AgentRecord | null> {
+    const rows = await this.q<Record<string, unknown>>(
+      `select * from public.agents where owner_id = $1 and id = $2 limit 1`,
+      [ownerId, agentId],
+    );
+    return rows[0] ? this.mapAgentRow(rows[0]) : null;
+  }
+
+  async listAgents(ownerId: string): Promise<AgentRecord[]> {
+    const rows = await this.q<Record<string, unknown>>(
+      `select * from public.agents where owner_id = $1 order by name asc`,
       [ownerId],
     );
+    return rows.map((r) => this.mapAgentRow(r));
+  }
+
+  async patchAgent(ownerId: string, agentId: string, patch: AgentPatch): Promise<AgentRecord> {
+    const sets: string[] = [];
+    const params: unknown[] = [ownerId, agentId];
+    const field: Record<string, string> = {
+      name: 'name',
+      description: 'description',
+      role: 'role',
+      capabilities: 'capabilities',
+      status: 'status',
+    };
+    for (const [k, v] of Object.entries(patch)) {
+      const col = field[k];
+      if (!col) continue;
+      params.push(k === 'capabilities' ? JSON.stringify(v) : v === null ? null : v);
+      sets.push(`${col} = $${params.length}`);
+    }
+    if (sets.length === 0) throw new Error('empty patch');
+    const rows = await this.q<Record<string, unknown>>(
+      `update public.agents set ${sets.join(', ')} where owner_id = $1 and id = $2 returning *`,
+      params,
+    );
+    return this.mapAgentRow(rows[0]!);
   }
 
   async agentHasPermission(agentId: string, projectId: string | null, resourceType: string, permission: string): Promise<boolean> {

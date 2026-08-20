@@ -132,29 +132,25 @@ describe('CommandPipeline (OWNER COMMAND → … → OUTCOME)', () => {
 
   it('agents need scoped permission (least privilege, no implicit grants)', async () => {
     const store = await storeWithChefHQ();
-    store.agents.push({
-      id: 'agent-a', name: 'A', slug: 'a', role: 'worker', status: 'active',
-      permissions: [{ projectId: store.projects[0].id, resourceType: 'task', permission: 'write' }],
-    });
-    const agent: ActorContext = { ownerId: 'owner-1', actorId: 'agent-a', actorType: 'agent', agentId: 'agent-a' };
+    const agent = await store.createAgent('owner-1', { name: 'A', slug: 'a', role: 'worker', status: 'active' });
+    store.agentPermissions.push({ agentId: agent.id, projectId: store.projects[0]!.id, resourceType: 'task', permission: 'write' });
+    const actx: ActorContext = { ownerId: 'owner-1', actorId: agent.id, actorType: 'agent', agentId: agent.id };
     const p = new CommandPipeline(store, okRunner({}));
-    const ok = await p.run(agent, 'create task "allowed" in chef-hq');
+    const ok = await p.run(actx, 'create task "allowed" in chef-hq');
     expect(ok.outcome).toBe('executed');
   });
 
   it('agents without permission are denied — project scope isolation', async () => {
     const store = await storeWithChefHQ();
     await store.createProject('owner-1', { name: 'Other', slug: 'other' });
-    store.agents.push({
-      id: 'agent-a', name: 'A', slug: 'a', role: 'worker', status: 'active',
-      permissions: [{ projectId: store.projects[0].id, resourceType: 'task', permission: 'write' }],
-    });
-    const agent: ActorContext = { ownerId: 'owner-1', actorId: 'agent-a', actorType: 'agent', agentId: 'agent-a' };
+    const agent = await store.createAgent('owner-1', { name: 'A', slug: 'a', role: 'worker', status: 'active' });
+    store.agentPermissions.push({ agentId: agent.id, projectId: store.projects[0]!.id, resourceType: 'task', permission: 'write' });
+    const actx: ActorContext = { ownerId: 'owner-1', actorId: agent.id, actorType: 'agent', agentId: agent.id };
     const p = new CommandPipeline(store, okRunner({}));
-    const denied = await p.run(agent, 'create task "not allowed" in other');
+    const denied = await p.run(actx, 'create task "not allowed" in other');
     expect(denied.outcome).toBe('denied');
     // The only artifact in the other project is the cancellation record — no work leaked.
-    const tasksInOther = await store.listTasks('owner-1', { projectId: store.projects[1].id });
+    const tasksInOther = await store.listTasks('owner-1', { projectId: store.projects[1]!.id });
     expect(tasksInOther).toHaveLength(1);
     expect(tasksInOther[0]?.status).toBe('cancelled');
   });

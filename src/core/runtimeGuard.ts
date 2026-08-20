@@ -9,6 +9,7 @@ import {
   PERMISSIONS,
   ENVIRONMENTS,
   AUTONOMY_LEVELS,
+  AGENT_STATUSES,
 } from './types.js';
 
 type TupleToSet<T extends readonly string[]> = T[number];
@@ -55,4 +56,30 @@ export function isStringArray(v: unknown): v is string[] {
 
 export function isNonEmptyString(v: unknown): v is string {
   return typeof v === 'string' && v.trim().length > 0;
+}
+
+// ---------- Gate 25 — Agent validation ----------
+
+export const VALID_AGENT_STATUSES: ReadonlySet<string> = new Set<string>(AGENT_STATUSES);
+
+export function isAgentStatus(v: unknown): v is TupleToSet<typeof AGENT_STATUSES> {
+  return typeof v === 'string' && VALID_AGENT_STATUSES.has(v);
+}
+
+/**
+ * Validates an agent role string. Roles are an OPEN SET — any non-empty
+ * string within reasonable bounds is accepted. This allows adding future
+ * specialized roles (frontend_engineer, qa_engineer, etc.) without code changes.
+ */
+export function isAgentRole(v: unknown): v is string {
+  return typeof v === 'string' && v.trim().length > 0 && v.length <= 64;
+}
+
+/**
+ * Validates capabilities — must be an array of non-empty strings.
+ * Capabilities describe what an agent is SUITED/ELIGIBLE to do.
+ * They do NOT grant permission (that is RBAC's responsibility).
+ */
+export function isAgentCapabilities(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((item) => typeof item === 'string' && item.trim().length > 0 && item.length <= 128);
 }
