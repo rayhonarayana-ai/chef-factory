@@ -146,9 +146,9 @@ export class SupabaseStore implements Store {
         ownerId, data.projectId, data.title, data.description ?? null, data.agentId ?? null,
         data.priority ?? 'medium', data.riskLevel ?? 'low', data.authorityLevel ?? null,
         data.autonomy ?? null, data.approvalRequired ?? false,
-        data.requiredCapabilities ?? [], data.preferredRole ?? null,
+        JSON.stringify(data.requiredCapabilities ?? []), data.preferredRole ?? null,
         data.status ?? 'created',
-        data.inputs ?? {}, data.maxAttempts ?? 3, data.correlationId ?? null, data.createdBy ?? null,
+        JSON.stringify(data.inputs ?? {}), data.maxAttempts ?? 3, data.correlationId ?? null, data.createdBy ?? null,
       ],
     );
     return rows[0]!;
@@ -270,6 +270,62 @@ export class SupabaseStore implements Store {
         previousAgentId,
         nextAgentId: agentId,
       };
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Gate 30: Atomic assign-if-unassigned. Never overwrites an existing assignment.
+  // Lock order: Task → Agent (consistent with Gate 28 deadlock-safe protocol).
+  // The transaction atomically checks agent_id IS NULL before writing.
+  async assignTaskIfUnassigned(ownerId: string, taskId: string, agentId: string): Promise<import('../core/ports.js').AssignTaskIfUnassignedResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Lock and read the task
+      const taskRows = await client.query<{ id: string; agent_id: string | null }>(
+        `SELECT id, agent_id FROM public.tasks WHERE id = $1 AND owner_id = $2 FOR UPDATE`,
+        [taskId, ownerId],
+      );
+      if (taskRows.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'task_not_found', previousAgentId: null, nextAgentId: agentId };
+      }
+      const previousAgentId = taskRows.rows[0]!.agent_id;
+
+      // 2. Atomic guard: if already assigned, NEVER overwrite
+      if (previousAgentId !== null) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'already_assigned', previousAgentId, nextAgentId: agentId };
+      }
+
+      // 3. Lock and validate agent
+      const agentRows = await client.query<{ id: string; status: string }>(
+        `SELECT id, status FROM public.agents WHERE id = $1 AND owner_id = $2 FOR UPDATE`,
+        [agentId, ownerId],
+      );
+      if (agentRows.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'agent_not_found', previousAgentId, nextAgentId: agentId };
+      }
+      if (agentRows.rows[0]!.status !== 'active') {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'agent_not_eligible', previousAgentId, nextAgentId: agentId };
+      }
+
+      // 4. Atomic write — agent_id was NULL, now set
+      await client.query(
+        `UPDATE public.tasks SET agent_id = $3, updated_at = now() WHERE id = $1 AND owner_id = $2`,
+        [taskId, ownerId, agentId],
+      );
+
+      await client.query('COMMIT');
+
+      return { ok: true, outcome: 'assigned', previousAgentId: null, nextAgentId: agentId };
     } catch (e) {
       await client.query('ROLLBACK');
       throw e;

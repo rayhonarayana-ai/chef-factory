@@ -35,6 +35,7 @@ export interface SelectionInput {
   store: Store;
   ownerId: string;
   task: TaskRecord;
+  excludeAgentIds?: string[];
 }
 
 // ---------- Core selector ----------
@@ -48,9 +49,10 @@ export interface SelectionInput {
  */
 export async function selectCandidate(input: SelectionInput): Promise<SelectionResult> {
   const { store, ownerId, task } = input;
+  const excludeSet = new Set(input.excludeAgentIds ?? []);
 
   // 1. Discover owner agents (O(1) DB round trip)
-  const agents = await store.listAgents(ownerId);
+  const agents = (await store.listAgents(ownerId)).filter((a) => !excludeSet.has(a.id));
 
   // 2. Zero agents → no_agents_found
   if (agents.length === 0) {

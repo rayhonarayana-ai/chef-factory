@@ -92,6 +92,20 @@ export interface AssignTaskResult {
   nextAgentId: string | null;
 }
 
+export type AssignTaskIfUnassignedOutcome =
+  | 'assigned'
+  | 'already_assigned'
+  | 'task_not_found'
+  | 'agent_not_found'
+  | 'agent_not_eligible';
+
+export interface AssignTaskIfUnassignedResult {
+  ok: boolean;
+  outcome: AssignTaskIfUnassignedOutcome;
+  previousAgentId: string | null;
+  nextAgentId: string | null;
+}
+
 export interface Store {
   // agents / permissions (Gate 25: full agent CRUD)
   createAgent(ownerId: string, data: AgentDefinition): Promise<AgentRecord>;
@@ -131,6 +145,7 @@ export interface Store {
   listTasks(ownerId: string, filter?: { projectId?: string; status?: TaskRecord['status'] }): Promise<TaskRecord[]>;
   patchTask(ownerId: string, taskId: string, patch: TaskPatch): Promise<TaskRecord>;
   assignTask(ownerId: string, taskId: string, agentId: string | null): Promise<AssignTaskResult>;
+  assignTaskIfUnassigned(ownerId: string, taskId: string, agentId: string): Promise<AssignTaskIfUnassignedResult>;
   createTaskRun(ownerId: string, data: {
     taskId: string;
     runNumber: number;

@@ -122,6 +122,20 @@ export class MemoryStore implements Store {
     t.updatedAt = now();
     return { ok: true, outcome: agentId !== null ? 'assigned' : 'unassigned', previousAgentId, nextAgentId: agentId };
   }
+
+  // Gate 30: Atomic assign-if-unassigned. Never overwrites an existing assignment.
+  async assignTaskIfUnassigned(ownerId: string, taskId: string, agentId: string): Promise<import('../core/ports.js').AssignTaskIfUnassignedResult> {
+    const t = this.tasks.find((x) => x.ownerId === ownerId && x.id === taskId);
+    if (!t) return { ok: false, outcome: 'task_not_found', previousAgentId: null, nextAgentId: agentId };
+    const previousAgentId = t.agentId;
+    if (previousAgentId !== null) return { ok: false, outcome: 'already_assigned', previousAgentId, nextAgentId: agentId };
+    const agent = this.agents.find((a) => a.ownerId === ownerId && a.id === agentId);
+    if (!agent) return { ok: false, outcome: 'agent_not_found', previousAgentId, nextAgentId: agentId };
+    if (agent.status !== 'active') return { ok: false, outcome: 'agent_not_eligible', previousAgentId, nextAgentId: agentId };
+    t.agentId = agentId;
+    t.updatedAt = now();
+    return { ok: true, outcome: 'assigned', previousAgentId: null, nextAgentId: agentId };
+  }
   async createTaskRun(ownerId: string, data: { taskId: string; runNumber: number; modelId?: string | null; runtimeId?: string | null; inputSnapshot?: JsonObject | null }): Promise<TaskRunRecord> {
     const r: TaskRunRecord = { id: uuid(), taskId: data.taskId, runNumber: data.runNumber, status: 'running', modelId: data.modelId ?? null, runtimeId: data.runtimeId ?? null, inputSnapshot: data.inputSnapshot ?? null, outputSnapshot: null, error: null, durationMs: null, cost: 0, startedAt: now(), completedAt: null };
     this.taskRuns.push(r);
