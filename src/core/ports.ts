@@ -52,6 +52,8 @@ export interface TaskPatch {
   completedAt?: string | null;
   agentId?: string | null;
   environmentId?: string | null;
+  requiredCapabilities?: string[];
+  preferredRole?: string | null;
 }
 
 export interface ApprovalPatch {
@@ -117,6 +119,8 @@ export interface Store {
     authorityLevel?: TaskRecord['authorityLevel'];
     autonomy?: TaskRecord['autonomy'];
     approvalRequired?: boolean;
+    requiredCapabilities?: string[];
+    preferredRole?: string | null;
     status?: TaskRecord['status'];
     inputs?: JsonObject;
     maxAttempts?: number;

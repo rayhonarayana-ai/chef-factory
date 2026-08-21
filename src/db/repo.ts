@@ -139,12 +139,15 @@ export class SupabaseStore implements Store {
     const rows = await this.q<TaskRecord>(
       `insert into public.tasks (
          owner_id, project_id, title, description, agent_id, priority, risk_level,
-         authority_level, autonomy, approval_required, status, inputs, max_attempts, correlation_id, created_by
-       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) returning *`,
+         authority_level, autonomy, approval_required, required_capabilities, preferred_role,
+         status, inputs, max_attempts, correlation_id, created_by
+       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) returning *`,
       [
         ownerId, data.projectId, data.title, data.description ?? null, data.agentId ?? null,
         data.priority ?? 'medium', data.riskLevel ?? 'low', data.authorityLevel ?? null,
-        data.autonomy ?? null, data.approvalRequired ?? false, data.status ?? 'created',
+        data.autonomy ?? null, data.approvalRequired ?? false,
+        data.requiredCapabilities ?? [], data.preferredRole ?? null,
+        data.status ?? 'created',
         data.inputs ?? {}, data.maxAttempts ?? 3, data.correlationId ?? null, data.createdBy ?? null,
       ],
     );
@@ -195,6 +198,8 @@ export class SupabaseStore implements Store {
       completedAt: 'completed_at',
       agentId: 'agent_id',
       environmentId: 'environment_id',
+      requiredCapabilities: 'required_capabilities',
+      preferredRole: 'preferred_role',
     };
     for (const [k, v] of Object.entries(patch) as [keyof import('../core/ports.js').TaskPatch, unknown][]) {
       const col = field[k];

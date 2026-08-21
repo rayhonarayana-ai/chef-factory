@@ -82,7 +82,9 @@ export class MemoryStore implements Store {
       agentId: data.agentId ?? null, title: data.title, description: data.description ?? null,
       status: data.status ?? 'created', priority: data.priority ?? 'medium', riskLevel: data.riskLevel ?? 'low',
       authorityLevel: data.authorityLevel ?? null, autonomy: data.autonomy ?? null,
-      approvalRequired: data.approvalRequired ?? false, inputs: data.inputs ?? {}, output: null, error: null,
+      approvalRequired: data.approvalRequired ?? false,
+      requiredCapabilities: data.requiredCapabilities ?? [], preferredRole: data.preferredRole ?? null,
+      inputs: data.inputs ?? {}, output: null, error: null,
       attempts: 0, maxAttempts: data.maxAttempts ?? 3, correlationId: data.correlationId ?? null,
       createdBy: data.createdBy ?? null, createdAt: now(), startedAt: null, completedAt: null, updatedAt: now(),
     };

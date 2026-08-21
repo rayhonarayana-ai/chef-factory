@@ -159,6 +159,8 @@ export interface TaskRecord {
   authorityLevel: AutonomyLevel | null;
   autonomy: AutonomyLevel | null;
   approvalRequired: boolean;
+  requiredCapabilities: string[];
+  preferredRole: string | null;
   inputs: JsonObject;
   output: JsonObject | null;
   error: JsonObject | null;
