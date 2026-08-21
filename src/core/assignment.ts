@@ -1,23 +1,24 @@
-// CHEF FACTORY — Gate 26 — Agent Assignment & Delegation Contract Foundation.
+// CHEF FACTORY — Gate 26/28 — Agent Assignment & Delegation Contract.
 // Typed, validated, auditable contract for assigning Tasks to Agents.
 //
 // Core invariants:
 //   ASSIGNMENT_GRANTS_PERMISSION = NO
 //   Only owners may assign (agents cannot delegate)
-//   Agent must exist, belong to same owner, and be 'active'
+//   Agent eligibility validated atomically at DB level (Gate 28)
 //   Assignment never widens authority
 //
-// Uses existing TaskRecord.agentId as source of truth.
-// No new database table. No migration.
+// Gate 28: Canonical persistence path is store.assignTask().
+// The old read-validate-write path is removed.
 
-import type { Store } from './ports.js';
+import type { Store, AssignTaskResult } from './ports.js';
 import type { TaskRecord } from './types.js';
 
 export interface AssignmentResult {
   ok: boolean;
-  task: TaskRecord;
+  task?: TaskRecord;
   previousAgentId: string | null;
   nextAgentId: string | null;
+  outcome: AssignTaskResult['outcome'];
   reason?: string;
 }
 
@@ -44,26 +45,9 @@ function validateInputs(taskId: string, agentId: string | null): void {
 }
 
 /**
- * Validates agent eligibility for assignment:
- * - Agent must exist and belong to the same owner
- * - Agent status must be 'active'
- */
-async function validateAgentEligibility(
-  store: Store,
-  ownerId: string,
-  agentId: string,
-): Promise<void> {
-  const agent = await store.getAgent(ownerId, agentId);
-  if (!agent) {
-    throw new Error('assignment rejected: agent not found or belongs to another owner');
-  }
-  if (agent.status !== 'active') {
-    throw new Error(`assignment rejected: agent status is "${agent.status}" — only "active" agents may receive work`);
-  }
-}
-
-/**
- * Gate 26: Assign, reassign, or unassign a Task to/from an Agent.
+ * Gate 26/28: Assign, reassign, or unassign a Task to/from an Agent.
+ *
+ * Canonical persistence path: store.assignTask() — atomic at DB level.
  *
  * - assign:   setTaskAssignment(store, ownerId, taskId, agentId, actorId)
  * - reassign: setTaskAssignment(store, ownerId, taskId, newAgentId, actorId)
@@ -71,11 +55,10 @@ async function validateAgentEligibility(
  *
  * Eligibility:
  *   1. Actor must be the owner (agents cannot delegate)
- *   2. Task must exist and belong to the owner
- *   3. If assigning: agent must exist, same owner, status=active
+ *   2. Atomic DB operation validates task existence, agent existence,
+ *      and agent eligibility (status=active) under lock
  *
  * Side effects:
- *   - Patches TaskRecord.agentId via existing store.patchTask
  *   - Records audit event (task.assigned / task.unassigned / task.reassigned)
  *
  * Does NOT:
@@ -103,34 +86,41 @@ export async function setTaskAssignment(
   // 2. Actor authorization — owner-only (agents cannot delegate)
   validateAssignor(actorId, ownerId);
 
-  // 3. Task existence and ownership
-  const task = await store.getTask(ownerId, taskId);
-  if (!task) {
-    throw new Error('assignment rejected: task not found or belongs to another owner');
+  // 3. Atomic assignment via Store (Gate 28: TOCTOU-protected)
+  const result = await store.assignTask(ownerId, taskId, agentId);
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      previousAgentId: result.previousAgentId,
+      nextAgentId: result.nextAgentId,
+      outcome: result.outcome,
+      reason: result.outcome === 'task_not_found'
+        ? 'assignment rejected: task not found or belongs to another owner'
+        : result.outcome === 'agent_not_found'
+          ? 'assignment rejected: agent not found or belongs to another owner'
+          : result.outcome === 'agent_not_eligible'
+            ? 'assignment rejected: agent is not eligible for assignment'
+            : 'assignment failed',
+    };
   }
 
-  // 4. Agent eligibility (if assigning, not unassigning)
-  if (agentId !== null) {
-    await validateAgentEligibility(store, ownerId, agentId);
-  }
-
-  // 5. Skip if no change
-  const previousAgentId = task.agentId;
-  if (previousAgentId === agentId) {
+  // 4. No-change — no audit
+  if (result.outcome === 'no_change') {
     return {
       ok: true,
-      task,
-      previousAgentId,
-      nextAgentId: agentId,
+      previousAgentId: result.previousAgentId,
+      nextAgentId: result.nextAgentId,
+      outcome: 'no_change',
       reason: 'no change — task already assigned to this agent',
     };
   }
 
-  // 6. Persist assignment via existing patchTask
-  const updatedTask = await store.patchTask(ownerId, taskId, { agentId });
+  // 5. Read the updated task for the audit event
+  const updatedTask = await store.getTask(ownerId, taskId);
 
-  // 7. Audit — failure-isolated (does not throw on audit persistence failure)
-  const action = previousAgentId === null
+  // 6. Audit — best-effort, failure-isolated (Gate 21 pattern)
+  const action = result.previousAgentId === null
     ? 'task.assigned'
     : agentId === null
       ? 'task.unassigned'
@@ -141,7 +131,7 @@ export async function setTaskAssignment(
       actorType: 'owner',
       actorId,
       action,
-      projectId: task.projectId,
+      projectId: updatedTask?.projectId ?? null,
       environmentId: null,
       resourceType: 'task',
       resourceId: taskId,
@@ -149,9 +139,9 @@ export async function setTaskAssignment(
       correlationId: null,
       taskId,
       metadata: {
-        previousAgentId,
-        nextAgentId: agentId,
-        taskTitle: task.title,
+        previousAgentId: result.previousAgentId,
+        nextAgentId: result.nextAgentId,
+        taskTitle: updatedTask?.title ?? null,
       },
     });
   } catch {
@@ -160,8 +150,9 @@ export async function setTaskAssignment(
 
   return {
     ok: true,
-    task: updatedTask,
-    previousAgentId,
-    nextAgentId: agentId,
+    task: updatedTask ?? undefined,
+    previousAgentId: result.previousAgentId,
+    nextAgentId: result.nextAgentId,
+    outcome: result.outcome,
   };
 }

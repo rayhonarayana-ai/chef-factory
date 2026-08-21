@@ -46,8 +46,9 @@ describe('Gate 26 — Assignment Eligibility', () => {
     const task = await createTask(store);
     const agent = await createAgent(store, { status: 'paused' });
 
-    await expect(setTaskAssignment(store, 'owner-1', task.id, agent.id, 'owner-1'))
-      .rejects.toThrow(/agent status is "paused"/);
+    const r = await setTaskAssignment(store, 'owner-1', task.id, agent.id, 'owner-1');
+    expect(r.ok).toBe(false);
+    expect(r.outcome).toBe('agent_not_eligible');
   });
 
   it('retired agent is rejected', async () => {
@@ -55,8 +56,9 @@ describe('Gate 26 — Assignment Eligibility', () => {
     const task = await createTask(store);
     const agent = await createAgent(store, { status: 'retired' });
 
-    await expect(setTaskAssignment(store, 'owner-1', task.id, agent.id, 'owner-1'))
-      .rejects.toThrow(/agent status is "retired"/);
+    const r = await setTaskAssignment(store, 'owner-1', task.id, agent.id, 'owner-1');
+    expect(r.ok).toBe(false);
+    expect(r.outcome).toBe('agent_not_eligible');
   });
 
   it('suspended agent is rejected', async () => {
@@ -64,24 +66,27 @@ describe('Gate 26 — Assignment Eligibility', () => {
     const task = await createTask(store);
     const agent = await createAgent(store, { status: 'suspended' });
 
-    await expect(setTaskAssignment(store, 'owner-1', task.id, agent.id, 'owner-1'))
-      .rejects.toThrow(/agent status is "suspended"/);
+    const r = await setTaskAssignment(store, 'owner-1', task.id, agent.id, 'owner-1');
+    expect(r.ok).toBe(false);
+    expect(r.outcome).toBe('agent_not_eligible');
   });
 
   it('unknown agent is rejected', async () => {
     const store = await setup();
     const task = await createTask(store);
 
-    await expect(setTaskAssignment(store, 'owner-1', task.id, 'nonexistent-agent', 'owner-1'))
-      .rejects.toThrow(/agent not found/);
+    const r = await setTaskAssignment(store, 'owner-1', task.id, 'nonexistent-agent', 'owner-1');
+    expect(r.ok).toBe(false);
+    expect(r.outcome).toBe('agent_not_found');
   });
 
   it('unknown task is rejected', async () => {
     const store = await setup();
     const agent = await createAgent(store);
 
-    await expect(setTaskAssignment(store, 'owner-1', 'nonexistent-task', agent.id, 'owner-1'))
-      .rejects.toThrow(/task not found/);
+    const r = await setTaskAssignment(store, 'owner-1', 'nonexistent-task', agent.id, 'owner-1');
+    expect(r.ok).toBe(false);
+    expect(r.outcome).toBe('task_not_found');
   });
 
   it('valid same-owner assignment succeeds', async () => {
@@ -100,8 +105,9 @@ describe('Gate 26 — Assignment Eligibility', () => {
     await store.createProject('owner-2', { name: 'Other', slug: 'other' });
     const task = await createTask(store);
 
-    await expect(setTaskAssignment(store, 'owner-1', task.id, otherAgent.id, 'owner-1'))
-      .rejects.toThrow(/agent not found/);
+    const r = await setTaskAssignment(store, 'owner-1', task.id, otherAgent.id, 'owner-1');
+    expect(r.ok).toBe(false);
+    expect(r.outcome).toBe('agent_not_found');
   });
 });
 
@@ -216,8 +222,9 @@ describe('Gate 26 — Reassignment', () => {
     const agentB = await store.createAgent('owner-1', { name: 'B', slug: 'rrb', role: 'worker', status: 'paused' });
 
     await setTaskAssignment(store, 'owner-1', task.id, agentA.id, 'owner-1');
-    await expect(setTaskAssignment(store, 'owner-1', task.id, agentB.id, 'owner-1'))
-      .rejects.toThrow(/agent status is "paused"/);
+    const r = await setTaskAssignment(store, 'owner-1', task.id, agentB.id, 'owner-1');
+    expect(r.ok).toBe(false);
+    expect(r.outcome).toBe('agent_not_eligible');
   });
 });
 

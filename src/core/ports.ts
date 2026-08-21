@@ -75,6 +75,21 @@ export interface AgentStats {
   historyCount: number;
 }
 
+export type AssignTaskOutcome =
+  | 'assigned'
+  | 'unassigned'
+  | 'no_change'
+  | 'task_not_found'
+  | 'agent_not_found'
+  | 'agent_not_eligible';
+
+export interface AssignTaskResult {
+  ok: boolean;
+  outcome: AssignTaskOutcome;
+  previousAgentId: string | null;
+  nextAgentId: string | null;
+}
+
 export interface Store {
   // agents / permissions (Gate 25: full agent CRUD)
   createAgent(ownerId: string, data: AgentDefinition): Promise<AgentRecord>;
@@ -111,6 +126,7 @@ export interface Store {
   getTask(ownerId: string, taskId: string): Promise<TaskRecord | null>;
   listTasks(ownerId: string, filter?: { projectId?: string; status?: TaskRecord['status'] }): Promise<TaskRecord[]>;
   patchTask(ownerId: string, taskId: string, patch: TaskPatch): Promise<TaskRecord>;
+  assignTask(ownerId: string, taskId: string, agentId: string | null): Promise<AssignTaskResult>;
   createTaskRun(ownerId: string, data: {
     taskId: string;
     runNumber: number;

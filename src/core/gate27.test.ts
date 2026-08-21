@@ -35,9 +35,9 @@ async function createFixtures() {
 describe('Gate 27 — Domain: setTaskAssignment', () => {
   it('D1: Domain BLOCKS cross-owner assignment', async () => {
     const { store, ownerA, taskA, agentB } = await createFixtures();
-    await expect(
-      setTaskAssignment(store, ownerA, taskA.id, agentB.id, ownerA),
-    ).rejects.toThrow(/agent not found or belongs to another owner/i);
+    const r = await setTaskAssignment(store, ownerA, taskA.id, agentB.id, ownerA);
+    expect(r.ok).toBe(false);
+    expect(r.outcome).toBe('agent_not_found');
   });
 
   it('D2: Domain BLOCKS agent delegation (actor != owner)', async () => {
@@ -233,9 +233,8 @@ describe('Gate 27 — Agent deletion semantics', () => {
 describe('Gate 27 — Three-layer defense model', () => {
   it('L1: Domain layer blocks cross-owner (setTaskAssignment)', async () => {
     const { store, ownerA, taskA, agentB } = await createFixtures();
-    await expect(
-      setTaskAssignment(store, ownerA, taskA.id, agentB.id, ownerA),
-    ).rejects.toThrow();
+    const r = await setTaskAssignment(store, ownerA, taskA.id, agentB.id, ownerA);
+    expect(r.ok).toBe(false);
   });
 
   it('L2: Store layer blocks cross-owner (patchTask)', async () => {

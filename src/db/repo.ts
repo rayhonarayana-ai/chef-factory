@@ -210,6 +210,69 @@ export class SupabaseStore implements Store {
     return rows[0]!;
   }
 
+  // Gate 28: Atomic assignment with TOCTOU protection.
+  // Lock order: Agent → Task (prevents deadlock with lifecycle mutations).
+  // Short transaction: only DB work, no external calls.
+  async assignTask(ownerId: string, taskId: string, agentId: string | null): Promise<import('../core/ports.js').AssignTaskResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Lock and read the task
+      const taskRows = await client.query<{ id: string; agent_id: string | null }>(
+        `SELECT id, agent_id FROM public.tasks WHERE id = $1 AND owner_id = $2 FOR UPDATE`,
+        [taskId, ownerId],
+      );
+      if (taskRows.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'task_not_found', previousAgentId: null, nextAgentId: agentId };
+      }
+      const previousAgentId = taskRows.rows[0]!.agent_id;
+
+      // 2. No-change short circuit
+      if (previousAgentId === agentId) {
+        await client.query('ROLLBACK');
+        return { ok: true, outcome: 'no_change', previousAgentId, nextAgentId: agentId };
+      }
+
+      // 3. If assigning (not unassigning), lock and validate agent
+      if (agentId !== null) {
+        const agentRows = await client.query<{ id: string; status: string }>(
+          `SELECT id, status FROM public.agents WHERE id = $1 AND owner_id = $2 FOR UPDATE`,
+          [agentId, ownerId],
+        );
+        if (agentRows.rows.length === 0) {
+          await client.query('ROLLBACK');
+          return { ok: false, outcome: 'agent_not_found', previousAgentId, nextAgentId: agentId };
+        }
+        if (agentRows.rows[0]!.status !== 'active') {
+          await client.query('ROLLBACK');
+          return { ok: false, outcome: 'agent_not_eligible', previousAgentId, nextAgentId: agentId };
+        }
+      }
+
+      // 4. Atomic write — agent eligibility was validated under lock
+      await client.query(
+        `UPDATE public.tasks SET agent_id = $3, updated_at = now() WHERE id = $1 AND owner_id = $2`,
+        [taskId, ownerId, agentId],
+      );
+
+      await client.query('COMMIT');
+
+      return {
+        ok: true,
+        outcome: agentId !== null ? 'assigned' : 'unassigned',
+        previousAgentId,
+        nextAgentId: agentId,
+      };
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
   async createTaskRun(ownerId: string, data: { taskId: string; runNumber: number; modelId?: string | null; runtimeId?: string | null; inputSnapshot?: JsonObject | null }): Promise<TaskRunRecord> {
     const rows = await this.q<TaskRunRecord>(
       `insert into public.task_runs (task_id, run_number, model_id, runtime_id, input_snapshot)

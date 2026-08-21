@@ -106,6 +106,20 @@ export class MemoryStore implements Store {
     this.tasks[this.tasks.indexOf(t)] = next;
     return next;
   }
+  async assignTask(ownerId: string, taskId: string, agentId: string | null): Promise<import('../core/ports.js').AssignTaskResult> {
+    const t = this.tasks.find((x) => x.ownerId === ownerId && x.id === taskId);
+    if (!t) return { ok: false, outcome: 'task_not_found', previousAgentId: null, nextAgentId: agentId };
+    const previousAgentId = t.agentId;
+    if (previousAgentId === agentId) return { ok: true, outcome: 'no_change', previousAgentId, nextAgentId: agentId };
+    if (agentId !== null) {
+      const agent = this.agents.find((a) => a.ownerId === ownerId && a.id === agentId);
+      if (!agent) return { ok: false, outcome: 'agent_not_found', previousAgentId, nextAgentId: agentId };
+      if (agent.status !== 'active') return { ok: false, outcome: 'agent_not_eligible', previousAgentId, nextAgentId: agentId };
+    }
+    t.agentId = agentId;
+    t.updatedAt = now();
+    return { ok: true, outcome: agentId !== null ? 'assigned' : 'unassigned', previousAgentId, nextAgentId: agentId };
+  }
   async createTaskRun(ownerId: string, data: { taskId: string; runNumber: number; modelId?: string | null; runtimeId?: string | null; inputSnapshot?: JsonObject | null }): Promise<TaskRunRecord> {
     const r: TaskRunRecord = { id: uuid(), taskId: data.taskId, runNumber: data.runNumber, status: 'running', modelId: data.modelId ?? null, runtimeId: data.runtimeId ?? null, inputSnapshot: data.inputSnapshot ?? null, outputSnapshot: null, error: null, durationMs: null, cost: 0, startedAt: now(), completedAt: null };
     this.taskRuns.push(r);
