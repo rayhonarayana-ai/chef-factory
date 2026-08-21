@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+_cleanup.mjs
 
 # Node
 node_modules/
