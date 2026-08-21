@@ -733,7 +733,7 @@ describe.skipIf(!enabled)('Gate 6 — Live Verification (query_data against real
     const cols = res.rows.map((r: any) => r.column_name);
 
     // Known tasks columns
-    const knownCols = ['id', 'owner_id', 'project_id', 'environment_id', 'parent_task_id', 'agent_id', 'title', 'description', 'status', 'priority', 'risk_level', 'authority_level', 'autonomy', 'approval_required', 'inputs', 'output', 'error', 'attempts', 'max_attempts', 'correlation_id', 'created_by', 'created_at', 'started_at', 'completed_at', 'updated_at'];
+    const knownCols = ['id', 'owner_id', 'project_id', 'environment_id', 'parent_task_id', 'agent_id', 'title', 'description', 'status', 'priority', 'risk_level', 'authority_level', 'autonomy', 'approval_required', 'inputs', 'output', 'error', 'attempts', 'max_attempts', 'correlation_id', 'created_by', 'created_at', 'started_at', 'completed_at', 'updated_at', 'required_capabilities', 'preferred_role'];
 
     for (const c of cols) {
       expect(knownCols).toContain(c);
