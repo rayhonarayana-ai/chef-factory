@@ -132,6 +132,10 @@ export class SupabaseStore implements Store {
 
   // ---------- tasks ----------
   async createTask(ownerId: string, data: Parameters<Store['createTask']>[1]): Promise<TaskRecord> {
+    if (data.agentId != null) {
+      const agent = await this.getAgent(ownerId, data.agentId);
+      if (!agent) throw new Error('cross-owner agent assignment rejected: agent not found or belongs to another owner');
+    }
     const rows = await this.q<TaskRecord>(
       `insert into public.tasks (
          owner_id, project_id, title, description, agent_id, priority, risk_level,
@@ -173,6 +177,10 @@ export class SupabaseStore implements Store {
   }
 
   async patchTask(ownerId: string, taskId: string, patch: import('../core/ports.js').TaskPatch): Promise<TaskRecord> {
+    if (patch.agentId !== undefined && patch.agentId !== null) {
+      const agent = await this.getAgent(ownerId, patch.agentId);
+      if (!agent) throw new Error('cross-owner agent assignment rejected: agent not found or belongs to another owner');
+    }
     const sets: string[] = [];
     const params: unknown[] = [ownerId, taskId];
     const field: Record<keyof import('../core/ports.js').TaskPatch, string> = {

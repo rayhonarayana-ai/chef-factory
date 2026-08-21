@@ -73,6 +73,10 @@ export class MemoryStore implements Store {
 
   // tasks
   async createTask(ownerId: string, data: Parameters<Store['createTask']>[1]): Promise<TaskRecord> {
+    if (data.agentId != null) {
+      const agent = await this.getAgent(ownerId, data.agentId);
+      if (!agent) throw new Error('cross-owner agent assignment rejected: agent not found or belongs to another owner');
+    }
     const t: TaskRecord = {
       id: uuid(), ownerId, projectId: data.projectId, environmentId: null, parentTaskId: null,
       agentId: data.agentId ?? null, title: data.title, description: data.description ?? null,
@@ -94,6 +98,10 @@ export class MemoryStore implements Store {
   async patchTask(ownerId: string, taskId: string, patch: TaskPatch): Promise<TaskRecord> {
     const t = await this.getTask(ownerId, taskId);
     if (!t) throw new Error('task not found');
+    if (patch.agentId !== undefined && patch.agentId !== null) {
+      const agent = await this.getAgent(ownerId, patch.agentId);
+      if (!agent) throw new Error('cross-owner agent assignment rejected: agent not found or belongs to another owner');
+    }
     const next = { ...t, ...patch, updatedAt: now() };
     this.tasks[this.tasks.indexOf(t)] = next;
     return next;
