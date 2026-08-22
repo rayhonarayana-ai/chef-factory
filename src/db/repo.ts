@@ -22,7 +22,7 @@ import type {
   TaskRecord,
   TaskRunRecord,
 } from '../core/types.js';
-import type { AgentStats, BudgetReport, Store } from '../core/ports.js';
+import type { AgentStats, AgentWorkload, BudgetReport, Store } from '../core/ports.js';
 import { emptyPassport } from '../core/passport.js';
 import { getPool } from './pool.js';
 import { Monitor } from '../core/monitoring.js';
@@ -278,9 +278,9 @@ export class SupabaseStore implements Store {
     }
   }
 
-  // Gate 30: Atomic assign-if-unassigned. Never overwrites an existing assignment.
+  // Gate 30+31: Atomic assign-if-unassigned with capacity check. Never overwrites an existing assignment.
   // Lock order: Task → Agent (consistent with Gate 28 deadlock-safe protocol).
-  // The transaction atomically checks agent_id IS NULL before writing.
+  // The transaction atomically checks agent_id IS NULL + capacity before writing.
   async assignTaskIfUnassigned(ownerId: string, taskId: string, agentId: string): Promise<import('../core/ports.js').AssignTaskIfUnassignedResult> {
     const client = await this.pool.connect();
     try {
@@ -304,8 +304,8 @@ export class SupabaseStore implements Store {
       }
 
       // 3. Lock and validate agent
-      const agentRows = await client.query<{ id: string; status: string }>(
-        `SELECT id, status FROM public.agents WHERE id = $1 AND owner_id = $2 FOR UPDATE`,
+      const agentRows = await client.query<{ id: string; status: string; max_concurrent_tasks: number }>(
+        `SELECT id, status, max_concurrent_tasks FROM public.agents WHERE id = $1 AND owner_id = $2 FOR UPDATE`,
         [agentId, ownerId],
       );
       if (agentRows.rows.length === 0) {
@@ -317,7 +317,25 @@ export class SupabaseStore implements Store {
         return { ok: false, outcome: 'agent_not_eligible', previousAgentId, nextAgentId: agentId };
       }
 
-      // 4. Atomic write — agent_id was NULL, now set
+      // 4. Gate 31: Capacity check — count non-terminal assigned tasks while agent is locked
+      const cap = agentRows.rows[0]!.max_concurrent_tasks;
+      if (cap <= 0) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'agent_at_capacity', previousAgentId, nextAgentId: agentId };
+      }
+      const countRows = await client.query<{ cnt: string }>(
+        `SELECT count(*) AS cnt FROM public.tasks
+         WHERE agent_id = $1 AND owner_id = $2
+           AND status NOT IN ('completed', 'failed', 'cancelled')`,
+        [agentId, ownerId],
+      );
+      const currentWorkload = Number(countRows.rows[0]!.cnt ?? 0);
+      if (currentWorkload >= cap) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'agent_at_capacity', previousAgentId, nextAgentId: agentId };
+      }
+
+      // 5. Atomic write — agent_id was NULL, now set
       await client.query(
         `UPDATE public.tasks SET agent_id = $3, updated_at = now() WHERE id = $1 AND owner_id = $2`,
         [taskId, ownerId, agentId],
@@ -620,24 +638,30 @@ export class SupabaseStore implements Store {
   private mapAgentRow(row: Record<string, unknown>): AgentRecord {
     return {
       id: row['id'] as string,
-      ownerId: row['owner_id'] as string,
+      ownerId: row['ownerId'] as string,
       name: row['name'] as string,
       slug: row['slug'] as string,
       role: row['role'] as string,
       description: (row['description'] as string) ?? null,
       capabilities: Array.isArray(row['capabilities']) ? row['capabilities'] as string[] : [],
       status: row['status'] as AgentRecord['status'],
-      createdAt: row['created_at'] as string,
-      updatedAt: row['updated_at'] as string,
+      maxConcurrentTasks: row['maxConcurrentTasks'] != null ? Number(row['maxConcurrentTasks']) : 1,
+      createdAt: row['createdAt'] as string,
+      updatedAt: row['updatedAt'] as string,
     };
   }
 
   async createAgent(ownerId: string, data: AgentDefinition): Promise<AgentRecord> {
     const slug = data.slug ?? data.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+    if (data.maxConcurrentTasks !== undefined) {
+      const n = Number(data.maxConcurrentTasks);
+      if (!Number.isFinite(n) || n < 0 || Math.floor(n) !== n) throw new Error('maxConcurrentTasks must be a non-negative integer');
+    }
+    const maxConcurrent = data.maxConcurrentTasks != null ? Number(data.maxConcurrentTasks) : 1;
     const rows = await this.q<Record<string, unknown>>(
-      `insert into public.agents (owner_id, name, slug, role, description, capabilities, status)
-       values ($1, $2, $3, $4, $5, $6, $7) returning *`,
-      [ownerId, data.name, slug, data.role, data.description ?? null, JSON.stringify(data.capabilities ?? []), data.status ?? 'active'],
+      `insert into public.agents (owner_id, name, slug, role, description, capabilities, status, max_concurrent_tasks)
+       values ($1, $2, $3, $4, $5, $6, $7, $8) returning *`,
+      [ownerId, data.name, slug, data.role, data.description ?? null, JSON.stringify(data.capabilities ?? []), data.status ?? 'active', maxConcurrent],
     );
     return this.mapAgentRow(rows[0]!);
   }
@@ -667,11 +691,20 @@ export class SupabaseStore implements Store {
       role: 'role',
       capabilities: 'capabilities',
       status: 'status',
+      maxConcurrentTasks: 'max_concurrent_tasks',
     };
     for (const [k, v] of Object.entries(patch)) {
       const col = field[k];
       if (!col) continue;
-      params.push(k === 'capabilities' ? JSON.stringify(v) : v === null ? null : v);
+      if (k === 'maxConcurrentTasks') {
+        const num = Number(v);
+        if (!Number.isFinite(num) || num < 0 || Math.floor(num) !== num) throw new Error('maxConcurrentTasks must be a non-negative integer');
+        params.push(num);
+      } else if (k === 'capabilities') {
+        params.push(JSON.stringify(v));
+      } else {
+        params.push(v === null ? null : v);
+      }
       sets.push(`${col} = $${params.length}`);
     }
     if (sets.length === 0) throw new Error('empty patch');
@@ -711,6 +744,26 @@ export class SupabaseStore implements Store {
       successRate: total === 0 ? 0 : done / total,
       historyCount: total,
     };
+  }
+
+  // Gate 31: Batch workload query — returns assignedCount and runningCount for all agents of an owner.
+  async listAgentWorkload(ownerId: string): Promise<import('../core/ports.js').AgentWorkload[]> {
+    const terminalStatuses = ['completed', 'failed', 'cancelled'];
+    const rows = await this.q<{ agentId: string; assignedCount: string; runningCount: string }>(
+      `SELECT
+         agent_id,
+         count(*) FILTER (WHERE status NOT IN (${terminalStatuses.map((_, i) => `$${i + 2}`).join(', ')})) AS assigned_count,
+         count(*) FILTER (WHERE status = $${terminalStatuses.length + 2}) AS running_count
+       FROM public.tasks
+       WHERE owner_id = $1 AND agent_id IS NOT NULL
+       GROUP BY agent_id`,
+      [ownerId, ...terminalStatuses, 'running'],
+    );
+    return rows.map((r) => ({
+      agentId: r.agentId,
+      assignedCount: Number(r.assignedCount ?? 0),
+      runningCount: Number(r.runningCount ?? 0),
+    }));
   }
 
   // ---------- monitoring ----------

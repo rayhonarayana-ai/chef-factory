@@ -141,7 +141,7 @@ export async function placeTask(input: PlacementInput): Promise<PlacementResult>
       };
     }
 
-    if (assignResult.outcome === 'agent_not_found' || assignResult.outcome === 'agent_not_eligible') {
+    if (assignResult.outcome === 'agent_not_found' || assignResult.outcome === 'agent_not_eligible' || assignResult.outcome === 'agent_at_capacity') {
       excludeAgentIds = [...excludeAgentIds, selection.selected!.agentId];
       continue;
     }

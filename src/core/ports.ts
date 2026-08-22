@@ -77,6 +77,13 @@ export interface AgentStats {
   historyCount: number;
 }
 
+/** Gate 31: Batch workload record for an agent. */
+export interface AgentWorkload {
+  agentId: string;
+  assignedCount: number;
+  runningCount: number;
+}
+
 export type AssignTaskOutcome =
   | 'assigned'
   | 'unassigned'
@@ -97,7 +104,8 @@ export type AssignTaskIfUnassignedOutcome =
   | 'already_assigned'
   | 'task_not_found'
   | 'agent_not_found'
-  | 'agent_not_eligible';
+  | 'agent_not_eligible'
+  | 'agent_at_capacity';
 
 export interface AssignTaskIfUnassignedResult {
   ok: boolean;
@@ -114,6 +122,8 @@ export interface Store {
   patchAgent(ownerId: string, agentId: string, patch: AgentPatch): Promise<AgentRecord>;
   agentHasPermission(agentId: string, projectId: string | null, resourceType: string, permission: string): Promise<boolean>;
   agentStats(agentId: string): Promise<AgentStats>;
+  // Gate 31: batch workload query for all agents of an owner
+  listAgentWorkload(ownerId: string): Promise<AgentWorkload[]>;
   // projects / passports
   getProjectBySlug(ownerId: string, slug: string): Promise<ProjectRecord | null>;
   getProject(ownerId: string, projectId: string): Promise<ProjectRecord | null>;

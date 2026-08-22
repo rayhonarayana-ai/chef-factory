@@ -1,7 +1,7 @@
 // Test fixture — in-memory Store implementation (deterministic, no I/O).
 // Used by pipeline / isolation / audit unit tests. NOT shipped in build.
 
-import type { Store, TaskPatch, ApprovalPatch, AgentStats, BudgetReport } from '../core/ports.js';
+import type { Store, TaskPatch, ApprovalPatch, AgentStats, AgentWorkload, BudgetReport } from '../core/ports.js';
 import type {
   AgentRecord, AgentDefinition, AgentPatch,
   ApprovalRecord, AuditEvent, AutonomyDecision, CostEvent, DailyStatus, DecisionRecord,
@@ -123,7 +123,7 @@ export class MemoryStore implements Store {
     return { ok: true, outcome: agentId !== null ? 'assigned' : 'unassigned', previousAgentId, nextAgentId: agentId };
   }
 
-  // Gate 30: Atomic assign-if-unassigned. Never overwrites an existing assignment.
+  // Gate 30+31: Atomic assign-if-unassigned with capacity check. Never overwrites an existing assignment.
   async assignTaskIfUnassigned(ownerId: string, taskId: string, agentId: string): Promise<import('../core/ports.js').AssignTaskIfUnassignedResult> {
     const t = this.tasks.find((x) => x.ownerId === ownerId && x.id === taskId);
     if (!t) return { ok: false, outcome: 'task_not_found', previousAgentId: null, nextAgentId: agentId };
@@ -132,6 +132,13 @@ export class MemoryStore implements Store {
     const agent = this.agents.find((a) => a.ownerId === ownerId && a.id === agentId);
     if (!agent) return { ok: false, outcome: 'agent_not_found', previousAgentId, nextAgentId: agentId };
     if (agent.status !== 'active') return { ok: false, outcome: 'agent_not_eligible', previousAgentId, nextAgentId: agentId };
+    // Gate 31: Capacity check
+    if (agent.maxConcurrentTasks <= 0) return { ok: false, outcome: 'agent_at_capacity', previousAgentId, nextAgentId: agentId };
+    const terminalStatuses = ['completed', 'failed', 'cancelled'];
+    const currentWorkload = this.tasks.filter(
+      (x) => x.agentId === agentId && x.ownerId === ownerId && !terminalStatuses.includes(x.status),
+    ).length;
+    if (currentWorkload >= agent.maxConcurrentTasks) return { ok: false, outcome: 'agent_at_capacity', previousAgentId, nextAgentId: agentId };
     t.agentId = agentId;
     t.updatedAt = now();
     return { ok: true, outcome: 'assigned', previousAgentId: null, nextAgentId: agentId };
@@ -230,6 +237,11 @@ export class MemoryStore implements Store {
     if (this.agents.some((a) => a.ownerId === ownerId && a.slug === slug)) {
       throw new Error(`agent slug "${slug}" already exists for this owner`);
     }
+    if (data.maxConcurrentTasks !== undefined) {
+      const n = Number(data.maxConcurrentTasks);
+      if (!Number.isFinite(n) || n < 0 || Math.floor(n) !== n) throw new Error('maxConcurrentTasks must be a non-negative integer');
+    }
+    const maxConcurrent = data.maxConcurrentTasks != null ? Number(data.maxConcurrentTasks) : 1;
     const agent: AgentRecord = {
       id: uuid(),
       ownerId,
@@ -239,6 +251,7 @@ export class MemoryStore implements Store {
       description: data.description ?? null,
       capabilities: data.capabilities ?? [],
       status: data.status ?? 'active',
+      maxConcurrentTasks: maxConcurrent,
       createdAt: now(),
       updatedAt: now(),
     };
@@ -260,6 +273,11 @@ export class MemoryStore implements Store {
     const entries = Object.entries(patch).filter(([, v]) => v !== undefined);
     if (entries.length === 0) throw new Error('empty patch');
     const current = this.agents[idx]!;
+    // Validate maxConcurrentTasks if present
+    if (patch.maxConcurrentTasks !== undefined) {
+      const num = Number(patch.maxConcurrentTasks);
+      if (!Number.isFinite(num) || num < 0 || Math.floor(num) !== num) throw new Error('maxConcurrentTasks must be a non-negative integer');
+    }
     const next: AgentRecord = {
       ...current,
       ...Object.fromEntries(entries),
@@ -280,6 +298,20 @@ export class MemoryStore implements Store {
   async agentStats(agentId: string): Promise<AgentStats> {
     void agentId;
     return { successRate: 0, historyCount: 0 };
+  }
+
+  // Gate 31: Batch workload query for all agents of an owner.
+  async listAgentWorkload(ownerId: string): Promise<AgentWorkload[]> {
+    const terminalStatuses = ['completed', 'failed', 'cancelled'];
+    const agentIds = new Set(this.agents.filter((a) => a.ownerId === ownerId).map((a) => a.id));
+    const result: AgentWorkload[] = [];
+    for (const agentId of agentIds) {
+      const tasks = this.tasks.filter((t) => t.agentId === agentId && t.ownerId === ownerId);
+      const assignedCount = tasks.filter((t) => !terminalStatuses.includes(t.status)).length;
+      const runningCount = tasks.filter((t) => t.status === 'running').length;
+      result.push({ agentId, assignedCount, runningCount });
+    }
+    return result;
   }
 
   // monitoring

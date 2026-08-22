@@ -344,6 +344,7 @@ export interface AgentRecord {
   description: string | null;
   capabilities: string[];
   status: AgentStatus;
+  maxConcurrentTasks: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -356,6 +357,7 @@ export interface AgentDefinition {
   description?: string | null;
   capabilities?: string[];
   status?: AgentStatus;
+  maxConcurrentTasks?: number;
 }
 
 /** Input contract for patching an existing agent. All fields optional. */
@@ -365,6 +367,7 @@ export interface AgentPatch {
   role?: string;
   capabilities?: string[];
   status?: AgentStatus;
+  maxConcurrentTasks?: number;
 }
 
 // ---------- Memory ----------

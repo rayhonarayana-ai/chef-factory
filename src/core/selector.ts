@@ -1,4 +1,4 @@
-// CHEF FACTORY — Gate 29 — Agent selection primitive.
+// CHEF FACTORY — Gate 29+31 — Agent selection primitive.
 // Pure, side-effect-free, read-only selection of suitable agents.
 // SELECTION_HAS_SIDE_EFFECTS = NO
 
@@ -21,7 +21,7 @@ export interface SelectedCandidate {
 
 export interface RejectedCandidate {
   agentId: string;
-  reason: 'inactive' | 'missing_capability';
+  reason: 'inactive' | 'missing_capability' | 'at_capacity' | 'capacity_zero';
 }
 
 export interface SelectionResult {
@@ -42,7 +42,7 @@ export interface SelectionInput {
 
 /**
  * Select the best candidate agent for a task.
- * Reads agents from the store, filters by lifecycle + capability eligibility,
+ * Reads agents from the store, filters by lifecycle + capability + availability eligibility,
  * deterministically ranks eligible candidates, and returns structured evidence.
  *
  * Zero writes. Zero side effects. Assignment is the caller's responsibility.
@@ -59,18 +59,31 @@ export async function selectCandidate(input: SelectionInput): Promise<SelectionR
     return { ok: false, outcome: 'no_agents_found', rejected: [] };
   }
 
-  // 3. Normalize task requirements
+  // 3. Gate 31: Batch workload query (single round trip, no N+1)
+  const workloadRows = await store.listAgentWorkload(ownerId);
+  const workloadMap = new Map<string, { assignedCount: number; runningCount: number }>();
+  for (const w of workloadRows) {
+    workloadMap.set(w.agentId, { assignedCount: w.assignedCount, runningCount: w.runningCount });
+  }
+
+  // 4. Normalize task requirements
   const requiredCaps = normalizeCapabilities(task.requiredCapabilities ?? []);
   const preferredRole = task.preferredRole ?? null;
 
-  // 4. Filter and partition agents
-  const eligible: AgentRecord[] = [];
+  // 5. Filter and partition agents
+  const eligible: (AgentRecord & { workload: number; utilization: number })[] = [];
   const rejected: RejectedCandidate[] = [];
 
   for (const agent of agents) {
     // Lifecycle: only active agents are eligible
     if (agent.status !== 'active') {
       rejected.push({ agentId: agent.id, reason: 'inactive' });
+      continue;
+    }
+
+    // Gate 31: capacity_zero = cannot accept new work
+    if (agent.maxConcurrentTasks <= 0) {
+      rejected.push({ agentId: agent.id, reason: 'capacity_zero' });
       continue;
     }
 
@@ -81,17 +94,28 @@ export async function selectCandidate(input: SelectionInput): Promise<SelectionR
       continue;
     }
 
-    eligible.push(agent);
+    // Gate 31: availability — current workload vs capacity
+    const wl = workloadMap.get(agent.id) ?? { assignedCount: 0, runningCount: 0 };
+    if (wl.assignedCount >= agent.maxConcurrentTasks) {
+      rejected.push({ agentId: agent.id, reason: 'at_capacity' });
+      continue;
+    }
+
+    const utilization = wl.assignedCount / agent.maxConcurrentTasks;
+    eligible.push({ ...agent, workload: wl.assignedCount, utilization });
   }
 
-  // 5. No eligible agents after filtering
+  // 6. No eligible agents after filtering
   if (eligible.length === 0) {
     return { ok: false, outcome: 'no_eligible_agent', rejected };
   }
 
-  // 6. Deterministic ranking
-  //    Priority: preferredRole match → createdAt ASC → id ASC
+  // 7. Deterministic ranking
+  //    Priority: LOWER utilization → preferredRole match → createdAt ASC → id ASC
   eligible.sort((a, b) => {
+    // Gate 31: lower utilization first
+    if (a.utilization !== b.utilization) return a.utilization - b.utilization;
+
     // Role preference: exact canonical match first
     if (preferredRole !== null) {
       const aRoleMatch = a.role === preferredRole ? 0 : 1;
@@ -108,7 +132,7 @@ export async function selectCandidate(input: SelectionInput): Promise<SelectionR
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
 
-  // 7. Select top candidate
+  // 8. Select top candidate
   const winner = eligible[0]!;
   const matchedCaps = normalizeCapabilities(winner.capabilities ?? []);
 
