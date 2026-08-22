@@ -21,6 +21,7 @@ import type { SecurityGuardian } from '../core/security/guardian.js';
 import type { SecurityScopeKey } from '../core/security/types.js';
 import type { RateLimiter } from '../core/security/rateLimit.js';
 import type { AnomalyDetector } from '../core/security/anomaly.js';
+import { resolveToolAuthorization } from '../core/agentAuthority.js';
 
 export const FACTORY_MAX_TOOL_ROUNDS = 10;
 
@@ -459,10 +460,25 @@ async function runToolLoop(
         const toolDef = toolDefs.find((t) => t.name === request.tool);
         const actionType = toolDef?.actionType ?? 'read';
         const permission = (toolDef?.riskLevel === 'low' || toolDef?.riskLevel === 'medium') ? 'read' : 'write';
+        const resolvedAuth = await resolveToolAuthorization({
+          store: store!,
+          actorId: ctx.actorId,
+          actorType: ctx.actorType,
+          ownerId: ctx.ownerId,
+          agentId: ctx.agentId ?? null,
+          projectId: task.projectId,
+          environment: (request.environment ?? 'development') as import('../core/types.js').EnvironmentName,
+          resourceType: 'tool',
+          permission,
+          actionType,
+          risk: (request.risk ?? 'low') as import('../core/types.js').RiskLevel,
+          explicitDeny: false,
+        });
         const result = await securityGuardian.evaluate({
           ownerId: ctx.ownerId,
           actorId: ctx.actorId,
           actorType: ctx.actorType as 'owner' | 'agent',
+          agentId: ctx.agentId ?? null,
           projectId: task.projectId,
           environment: (request.environment ?? 'development') as import('../core/types.js').EnvironmentName,
           grantedEnvironments: [(request.environment ?? 'development') as import('../core/types.js').EnvironmentName],
@@ -471,13 +487,13 @@ async function runToolLoop(
           actionType,
           permission: permission as import('../core/types.js').Permission,
           risk: request.risk as import('../core/types.js').RiskLevel,
-          authorized: true, // actorType is always 'owner' here — owner is authorized on own projects
+          authorized: resolvedAuth.authorized,
           explicitDeny: false,
           authorityOutcome: 'auto',
           scope: 'tool',
           correlationId: null,
           taskId: task.id,
-          evidence: [],
+          evidence: resolvedAuth.evidence,
         });
         return {
           allowed: !result.denied,
@@ -542,7 +558,22 @@ async function runToolLoop(
       const toolActionType = toolDef.actionType;
       const toolPermission = (toolRisk === 'low' || toolRisk === 'medium') ? 'read' : 'write';
       const toolRiskLevel = riskFromAction(toolActionType, intent.environment ?? 'development');
-      const toolAuthorized = ctx.actorType === 'owner'; // owners always authorized
+      const toolAuth = ctx.actorType === 'owner'
+        ? { authorized: true, reason: 'owner always authorized on own projects' }
+        : await resolveToolAuthorization({
+            store: store!,
+            actorId: ctx.actorId,
+            actorType: ctx.actorType,
+            ownerId: ctx.ownerId,
+            agentId: ctx.agentId ?? null,
+            projectId: task.projectId,
+            environment: (intent.environment ?? 'development') as import('../core/types.js').EnvironmentName,
+            resourceType: 'tool',
+            permission: toolPermission,
+            actionType: toolActionType,
+            risk: toolRiskLevel,
+            explicitDeny: false,
+          });
       const toolAuthority = evaluateAuthority({
         actorId: ctx.actorId,
         actorType: ctx.actorType as 'owner' | 'agent',
@@ -552,7 +583,7 @@ async function runToolLoop(
         permission: toolPermission as import('../core/types.js').Permission,
         risk: toolRiskLevel,
         actionType: toolActionType,
-        authorized: toolAuthorized,
+        authorized: toolAuth.authorized,
         explicitDeny: false,
       });
 

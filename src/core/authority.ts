@@ -144,6 +144,40 @@ export function evaluateAuthority(req: AuthorityRequest): AuthorityDecision {
   };
 }
 
-export function clampAutonomy(level: AutonomyLevel): AutonomyLevel {
-  return level;
+// Gate 32B: Autonomy lattice ordering (least → most restrictive).
+//   auto > notify > require_approval > deny
+// A clamp moves toward MORE restrictive (never less).
+// The authority ceiling is the authority outcome — autonomy must not exceed it.
+const AUTONOMY_RANK: Record<AutonomyLevel, number> = {
+  auto: 3,
+  notify: 2,
+  require_approval: 1,
+  deny: 0,
+};
+
+/**
+ * Gate 32B: Clamp autonomy so it never exceeds the authority ceiling.
+ *
+ * Invariant: clampAutonomy(selected, ceiling) produces a value <= ceiling.
+ * - DENY ceiling → result is always deny.
+ * - REQUIRE_APPROVAL ceiling → result is deny or require_approval.
+ * - NOTIFY ceiling → result is deny, require_approval, or notify.
+ * - AUTO ceiling → no restriction (identity).
+ *
+ * This ensures:
+ *   1. Explicit DENY cannot be elevated.
+ *   2. REQUIRE_APPROVAL cannot become AUTO for agents.
+ *   3. Protected actions cannot auto-execute.
+ *   4. Historical success never overrides authority.
+ */
+export function clampAutonomy(
+  selected: AutonomyLevel,
+  authorityCeiling: AutonomyLevel,
+): AutonomyLevel {
+  const selectedRank = AUTONOMY_RANK[selected];
+  const ceilingRank = AUTONOMY_RANK[authorityCeiling];
+  if (selectedRank > ceilingRank) {
+    return authorityCeiling;
+  }
+  return selected;
 }

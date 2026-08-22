@@ -25,6 +25,7 @@ import type {
 } from './types.js';
 import type { ActorContext, ConversationMessage } from './pipeline.js';
 import type { SecurityScopeKey } from './security/types.js';
+import { resolveToolAuthorization } from './agentAuthority.js';
 
 // ─── Constants ───────────────────────────────────────────────────────
 export const FACTORY_MAX_ORCHESTRATION_STEPS = 10;
@@ -373,10 +374,25 @@ export async function executeOrchestration(
         const toolDef = GATE3_TOOLS.find((t) => t.name === request.tool);
         const actionType = toolDef?.actionType ?? 'read';
         const permission = (toolDef?.riskLevel === 'low' || toolDef?.riskLevel === 'medium') ? 'read' : 'write';
+        const resolvedAuth = await resolveToolAuthorization({
+          store: ctx.store,
+          actorId: ctx.actorCtx.actorId,
+          actorType: ctx.actorCtx.actorType,
+          ownerId: ctx.actorCtx.ownerId,
+          agentId: ctx.actorCtx.agentId ?? null,
+          projectId: ctx.projectId,
+          environment: (request.environment ?? ctx.environment) as EnvironmentName,
+          resourceType: 'tool',
+          permission,
+          actionType,
+          risk: (request.risk ?? 'low') as RiskLevel,
+          explicitDeny: false,
+        });
         const result = await ctx.securityGuardian!.evaluate({
           ownerId: ctx.actorCtx.ownerId,
           actorId: ctx.actorCtx.actorId,
           actorType: ctx.actorCtx.actorType as 'owner' | 'agent',
+          agentId: ctx.actorCtx.agentId ?? null,
           projectId: ctx.projectId,
           environment: (request.environment ?? ctx.environment) as EnvironmentName,
           grantedEnvironments: [(request.environment ?? ctx.environment) as EnvironmentName],
@@ -385,13 +401,13 @@ export async function executeOrchestration(
           actionType,
           permission: permission as Permission,
           risk: request.risk as RiskLevel,
-          authorized: true, // actorType is always 'owner' here — owner is authorized on own projects
+          authorized: resolvedAuth.authorized,
           explicitDeny: false,
           authorityOutcome: 'auto',
           scope: 'tool',
           correlationId: plan.correlationId,
           taskId: null,
-          evidence: [],
+          evidence: resolvedAuth.evidence,
         });
         return {
           allowed: !result.denied,
@@ -559,7 +575,22 @@ export async function executeOrchestration(
     const toolActionType = toolDef.actionType;
     const toolPermission = (toolRisk === 'low' || toolRisk === 'medium') ? 'read' : 'write';
     const toolRiskLevel = riskFromAction(toolActionType, ctx.environment);
-    const toolAuthorized = ctx.actorCtx.actorType === 'owner';
+    const toolAuth = ctx.actorCtx.actorType === 'owner'
+      ? { authorized: true, reason: 'owner always authorized on own projects' }
+      : await resolveToolAuthorization({
+          store: ctx.store,
+          actorId: ctx.actorCtx.actorId,
+          actorType: ctx.actorCtx.actorType,
+          ownerId: ctx.actorCtx.ownerId,
+          agentId: ctx.actorCtx.agentId ?? null,
+          projectId: ctx.projectId,
+          environment: ctx.environment,
+          resourceType: 'tool',
+          permission: toolPermission,
+          actionType: toolActionType,
+          risk: toolRiskLevel,
+          explicitDeny: false,
+        });
     const toolAuthority = evaluateAuthority({
       actorId: ctx.actorCtx.actorId,
       actorType: ctx.actorCtx.actorType as 'owner' | 'agent',
@@ -569,7 +600,7 @@ export async function executeOrchestration(
       permission: toolPermission as Permission,
       risk: toolRiskLevel,
       actionType: toolActionType,
-      authorized: toolAuthorized,
+      authorized: toolAuth.authorized,
       explicitDeny: false,
     });
 

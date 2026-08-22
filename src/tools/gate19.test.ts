@@ -307,27 +307,27 @@ describe('Gate 19 — OD29: Security Authority Chain', () => {
     expect(content).toContain('Actor is not authorized for this action');
   });
 
-  it('OD29 forensic: execution.ts passes authorized=true for owner actorType', async () => {
+  it('OD29 forensic: execution.ts uses dynamic resolveToolAuthorization for agents', async () => {
     const fs = await import('node:fs');
     const content = fs.readFileSync(
       'C:/Users/user11/Documents/Default Project/chef-factory/src/api/execution.ts',
       'utf-8',
     );
-    expect(content).toContain('authorized: true');
-    expect(content).toContain('actorType is always');
+    expect(content).toContain('resolveToolAuthorization');
+    expect(content).toContain('ctx.actorType === \'owner\'');
   });
 
-  it('OD29 forensic: orchestration.ts passes authorized=true for owner actorType', async () => {
+  it('OD29 forensic: orchestration.ts uses dynamic resolveToolAuthorization for agents', async () => {
     const fs = await import('node:fs');
     const content = fs.readFileSync(
       'C:/Users/user11/Documents/Default Project/chef-factory/src/core/orchestration.ts',
       'utf-8',
     );
-    expect(content).toContain('authorized: true');
-    expect(content).toContain('actorType is always');
+    expect(content).toContain('resolveToolAuthorization');
+    expect(content).toContain('actorCtx.actorType === \'owner\'');
   });
 
-  it('OD29 forensic: both hook sites have identical authorization semantics', async () => {
+  it('OD29 forensic: both hook sites use identical dynamic authorization pattern', async () => {
     const fs = await import('node:fs');
     const execContent = fs.readFileSync(
       'C:/Users/user11/Documents/Default Project/chef-factory/src/api/execution.ts',
@@ -337,9 +337,10 @@ describe('Gate 19 — OD29: Security Authority Chain', () => {
       'C:/Users/user11/Documents/Default Project/chef-factory/src/core/orchestration.ts',
       'utf-8',
     );
-    const execMatch = execContent.match(/authorized:\s*(\w+)/g);
-    const orchMatch = orchContent.match(/authorized:\s*(\w+)/g);
-    expect(execMatch).toEqual(orchMatch);
+    expect(execContent).toContain('resolveToolAuthorization');
+    expect(orchContent).toContain('resolveToolAuthorization');
+    expect(execContent).toContain('securityGuardHook');
+    expect(orchContent).toContain('securityGuardHook');
   });
 
   it('OD29 forensic: pre-Gate-19 behavior preserved — security guardian still denies under lockdown', async () => {
