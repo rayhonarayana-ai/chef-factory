@@ -143,6 +143,23 @@ export class MemoryStore implements Store {
     t.updatedAt = now();
     return { ok: true, outcome: 'assigned', previousAgentId: null, nextAgentId: agentId };
   }
+
+  // Gate 34: Distributed-safe execution claim (memory simulation).
+  // Atomically transitions queued → running only if assigned and queued.
+  async claimTaskForExecution(ownerId: string, taskId: string, agentId: string): Promise<import('../core/ports.js').ClaimTaskResult> {
+    const t = this.tasks.find((x) => x.ownerId === ownerId && x.id === taskId);
+    if (!t) return { ok: false, outcome: 'task_not_found', task: null };
+    if (t.agentId === null) return { ok: false, outcome: 'not_assigned', task: null };
+    if (t.agentId !== agentId) return { ok: false, outcome: 'wrong_agent', task: null };
+    if (t.status === 'running') return { ok: false, outcome: 'already_running', task: { ...t } };
+    if (t.status !== 'queued') return { ok: false, outcome: 'not_queued', task: { ...t } };
+    // Simulate atomic claim
+    t.status = 'running';
+    t.startedAt = now();
+    t.updatedAt = now();
+    return { ok: true, outcome: 'claimed', task: { ...t } };
+  }
+
   async createTaskRun(ownerId: string, data: { taskId: string; runNumber: number; modelId?: string | null; runtimeId?: string | null; inputSnapshot?: JsonObject | null }): Promise<TaskRunRecord> {
     const r: TaskRunRecord = { id: uuid(), taskId: data.taskId, runNumber: data.runNumber, status: 'running', modelId: data.modelId ?? null, runtimeId: data.runtimeId ?? null, inputSnapshot: data.inputSnapshot ?? null, outputSnapshot: null, error: null, durationMs: null, cost: 0, startedAt: now(), completedAt: null };
     this.taskRuns.push(r);

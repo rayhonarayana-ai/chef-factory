@@ -352,6 +352,78 @@ export class SupabaseStore implements Store {
     }
   }
 
+  // Gate 34: Distributed-safe execution claim. Atomically transitions
+  // queued → running only if task is assigned to this agent and currently queued.
+  // Uses FOR UPDATE + conditional WHERE to prevent concurrent claims.
+  async claimTaskForExecution(ownerId: string, taskId: string, agentId: string): Promise<import('../core/ports.js').ClaimTaskResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Lock and read the task
+      const taskRows = await client.query<{
+        id: string; agent_id: string | null; status: string; owner_id: string;
+      }>(
+        `SELECT id, agent_id, status, owner_id FROM public.tasks WHERE id = $1 AND owner_id = $2 FOR UPDATE`,
+        [taskId, ownerId],
+      );
+      if (taskRows.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'task_not_found', task: null };
+      }
+      const row = taskRows.rows[0]!;
+
+      // 2. Verify assignment
+      if (row.agent_id === null) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'not_assigned', task: null };
+      }
+      if (row.agent_id !== agentId) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'wrong_agent', task: null };
+      }
+
+      // 3. Verify task is queued (eligible for execution)
+      if (row.status !== 'queued') {
+        // If already running, return already_running
+        if (row.status === 'running') {
+          const full = await this.getTask(ownerId, taskId);
+          await client.query('ROLLBACK');
+          return { ok: false, outcome: 'already_running', task: full };
+        }
+        const full = await this.getTask(ownerId, taskId);
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'not_queued', task: full };
+      }
+
+      // 4. Atomic claim: queued → running (WHERE guards against race)
+      const now = new Date().toISOString();
+      const updateRows = await client.query<{ id: string }>(
+        `UPDATE public.tasks
+         SET status = 'running', started_at = $3, updated_at = $3
+         WHERE id = $1 AND owner_id = $2 AND status = 'queued' AND agent_id = $4
+         RETURNING id`,
+        [taskId, ownerId, now, agentId],
+      );
+      if (updateRows.rowCount === 0) {
+        // Race lost — another claim won
+        await client.query('ROLLBACK');
+        const full = await this.getTask(ownerId, taskId);
+        return { ok: false, outcome: 'already_running', task: full };
+      }
+
+      await client.query('COMMIT');
+
+      const claimed = await this.getTask(ownerId, taskId);
+      return { ok: true, outcome: 'claimed', task: claimed };
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
   async createTaskRun(ownerId: string, data: { taskId: string; runNumber: number; modelId?: string | null; runtimeId?: string | null; inputSnapshot?: JsonObject | null }): Promise<TaskRunRecord> {
     const rows = await this.q<TaskRunRecord>(
       `insert into public.task_runs (task_id, run_number, model_id, runtime_id, input_snapshot)

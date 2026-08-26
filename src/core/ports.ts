@@ -114,6 +114,21 @@ export interface AssignTaskIfUnassignedResult {
   nextAgentId: string | null;
 }
 
+// Gate 34: Distributed-safe execution claim.
+export type ClaimTaskOutcome =
+  | 'claimed'
+  | 'task_not_found'
+  | 'not_assigned'
+  | 'wrong_agent'
+  | 'not_queued'
+  | 'already_running';
+
+export interface ClaimTaskResult {
+  ok: boolean;
+  outcome: ClaimTaskOutcome;
+  task: TaskRecord | null;
+}
+
 export interface Store {
   // agents / permissions (Gate 25: full agent CRUD)
   createAgent(ownerId: string, data: AgentDefinition): Promise<AgentRecord>;
@@ -273,4 +288,12 @@ export interface Store {
 
   // ————— Gate 21 — Stale RUNNING task recovery —————
   recoverStaleRunningTasks(staleBefore: Date): Promise<number>;
+
+  // ————— Gate 34 — Distributed-safe execution claim —————
+  // Atomically transitions queued → running ONLY if:
+  //   - task exists under this owner
+  //   - task.agentId === agentId (assigned)
+  //   - task.status === 'queued' (eligible)
+  // Uses FOR UPDATE + conditional WHERE to prevent concurrent claims.
+  claimTaskForExecution(ownerId: string, taskId: string, agentId: string): Promise<ClaimTaskResult>;
 }
