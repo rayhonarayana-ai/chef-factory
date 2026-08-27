@@ -71,7 +71,8 @@ export type CriticalActionClassification =
   | 'task'
   | 'agent'
   | 'security'
-  | 'memory';
+  | 'memory'
+  | 'verification';
 
 export interface CriticalActionRule {
   action: string;

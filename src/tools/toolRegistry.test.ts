@@ -3,8 +3,8 @@ import { GATE3_TOOLS, toOpenAITools, toAnthropicTools, toGoogleTools } from './i
 import type { ToolDefinition } from './types.js';
 
 describe('Gate 3 — Tool Registry', () => {
-  it('registers exactly 11 tools (6 core + 5 workspace/software)', () => {
-    expect(GATE3_TOOLS.length).toBe(11);
+  it('registers exactly 12 tools (6 core + 5 workspace/software + 1 verification)', () => {
+    expect(GATE3_TOOLS.length).toBe(12);
   });
 
   it('each tool has required fields', () => {
@@ -30,6 +30,7 @@ describe('Gate 3 — Tool Registry', () => {
       'list_tasks',
       'query_data',
       'read_file',
+      'run_verification',
       'search_text',
       'update_task',
     ]);
@@ -37,7 +38,7 @@ describe('Gate 3 — Tool Registry', () => {
 
   it('toOpenAITools produces correct format', () => {
     const openai = toOpenAITools(GATE3_TOOLS);
-    expect(openai.length).toBe(11);
+    expect(openai.length).toBe(12);
     for (const tool of openai) {
       expect(tool.type).toBe('function');
       const fn = tool.function as Record<string, unknown>;
@@ -49,7 +50,7 @@ describe('Gate 3 — Tool Registry', () => {
 
   it('toAnthropicTools produces correct format', () => {
     const anthropic = toAnthropicTools(GATE3_TOOLS);
-    expect(anthropic.length).toBe(11);
+    expect(anthropic.length).toBe(12);
     for (const tool of anthropic) {
       expect(tool.name).toBeTruthy();
       expect(tool.description).toBeTruthy();
@@ -59,7 +60,7 @@ describe('Gate 3 — Tool Registry', () => {
 
   it('toGoogleTools produces correct format', () => {
     const google = toGoogleTools(GATE3_TOOLS);
-    expect(google.length).toBe(11);
+    expect(google.length).toBe(12);
     for (const tool of google) {
       expect(tool.name).toBeTruthy();
       expect(tool.description).toBeTruthy();
@@ -149,5 +150,13 @@ describe('Gate 3 — Tool Registry', () => {
     expect(tool).toBeDefined();
     expect(tool!.riskLevel).toBe('medium');
     expect(tool!.actionType).toBe('software.file.write');
+  });
+
+  // Gate 35B — Safe Verification Execution
+  it('run_verification tool is medium risk', () => {
+    const tool = GATE3_TOOLS.find((t) => t.name === 'run_verification');
+    expect(tool).toBeDefined();
+    expect(tool!.riskLevel).toBe('medium');
+    expect(tool!.actionType).toBe('software.verification.execute');
   });
 });

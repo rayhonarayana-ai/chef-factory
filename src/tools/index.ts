@@ -13,6 +13,7 @@ export { readFileHandler } from '../software/tools/readFile.js';
 export { searchTextHandler } from '../software/tools/searchText.js';
 export { applyPatchHandler } from '../software/tools/applyPatch.js';
 export { createFileHandler } from '../software/tools/createFile.js';
+export { runVerificationHandler } from '../software/tools/runVerification.js';
 
 import type { ToolDefinition } from './types.js';
 import { createProjectHandler } from './create-project.js';
@@ -26,6 +27,7 @@ import { readFileHandler } from '../software/tools/readFile.js';
 import { searchTextHandler } from '../software/tools/searchText.js';
 import { applyPatchHandler } from '../software/tools/applyPatch.js';
 import { createFileHandler } from '../software/tools/createFile.js';
+import { runVerificationHandler } from '../software/tools/runVerification.js';
 
 export const GATE3_TOOLS: ToolDefinition[] = [
   {
@@ -199,6 +201,23 @@ export const GATE3_TOOLS: ToolDefinition[] = [
     actionType: 'software.file.write',
     requiresApproval: false,
     handler: createFileHandler,
+  },
+  // Gate 35B — Safe Verification Execution
+  {
+    name: 'run_verification',
+    description: 'Run a structured verification operation on the project workspace. Agent selects operation only (test, typecheck, build). All execution details resolved server-side. No shell access.',
+    parameters: {
+      type: 'object',
+      properties: {
+        operation: { type: 'string', description: 'Verification operation to run', enum: ['test', 'typecheck', 'build'] },
+        filter: { type: 'string', description: 'Optional test filter pattern (test operation only). Alphanumeric, slashes, dots, dashes allowed.' },
+      },
+      required: ['operation'],
+    },
+    riskLevel: 'medium' as const,
+    actionType: 'software.verification.execute',
+    requiresApproval: false,
+    handler: runVerificationHandler,
   },
 ];
 

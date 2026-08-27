@@ -698,8 +698,8 @@ describe('Gate 35A: REGRESSION', () => {
     expect(oldStyle.ownerId).toBe('test');
   });
 
-  it('P3: total tool count is 11 (6 existing + 5 new)', async () => {
+  it('P3: total tool count is 12 (6 existing + 5 new + 1 verification)', async () => {
     const { GATE3_TOOLS } = await import('../tools/index.js');
-    expect(GATE3_TOOLS.length).toBe(11);
+    expect(GATE3_TOOLS.length).toBe(12);
   });
 });

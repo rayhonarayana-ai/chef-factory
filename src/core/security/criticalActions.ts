@@ -37,6 +37,8 @@ export const CRITICAL_ACTIONS: readonly CriticalActionRule[] = [
   { action: 'agent_create', classification: 'agent', defaultDecision: 'require_approval', environments: 'all', description: 'Creating a new agent.', isCore: true },
   { action: 'agent_delete', classification: 'agent', defaultDecision: 'deny', environments: 'all', description: 'Deleting an agent.', isCore: true },
   { action: 'security_policy_edit', classification: 'security', defaultDecision: 'deny', environments: 'all', description: 'Editing security policy configuration.', isCore: true },
+  // Gate 35B — Safe Verification Execution
+  { action: 'software.verification.execute', classification: 'verification', defaultDecision: 'allow', environments: ['development', 'staging'], description: 'Running structured verification (test, typecheck, build) in approved workspace.', isCore: true },
   // Deferred (INERT — memory backend not yet implemented)
   { action: 'memory_write', classification: 'memory', defaultDecision: 'allow', environments: 'all', description: 'Writing to memory backend (deferred).', isCore: true },
   { action: 'memory_delete', classification: 'memory', defaultDecision: 'allow', environments: 'all', description: 'Deleting from memory backend (deferred).', isCore: true },
