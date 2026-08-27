@@ -781,7 +781,15 @@ describe('Gate 19 — OD32: Tool Results to Conversation', () => {
       'utf-8',
     );
     expect(content).toContain('store');
-    expect(content).toContain('toolDef.handler({ ownerId: ctx.ownerId, args, db, store })');
+    expect(content).toContain('toolDef.handler(');
+    expect(content).toContain('store,');
+
+    // Gate 35A: context must carry trusted execution context (assembled server-side)
+    expect(content).toContain('projectId: task.projectId');
+    expect(content).toContain('actorType: ctx.actorType');
+    expect(content).toContain('actorId: ctx.actorId');
+    expect(content).toContain('agentId: ctx.agentId ?? null');
+    expect(content).toContain('taskId: task.id');
   });
 
   it('orchestration.ts wires store to tool handler closures', async () => {

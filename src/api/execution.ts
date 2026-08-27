@@ -448,7 +448,20 @@ async function runToolLoop(
       action: toolDef.actionType,
       minRisk: toolDef.riskLevel,
       run: async (args: Record<string, unknown>) => {
-        return toolDef.handler({ ownerId: ctx.ownerId, args, db, store });
+        return toolDef.handler({
+          ownerId: ctx.ownerId,
+          args,
+          db,
+          store,
+          context: {
+            projectId: task.projectId,
+            actorType: ctx.actorType,
+            actorId: ctx.actorId,
+            agentId: ctx.agentId ?? null,
+            taskId: task.id,
+            environment: intent.environment ?? 'development',
+          },
+        });
       },
     };
     broker.register(tool);
@@ -631,7 +644,20 @@ async function runToolLoop(
         // G5-01: Tool validated by ToolBroker — now execute handler exactly once.
         consecutiveFailures = 0; // reset on success
         try {
-          const handlerResult = await toolDef.handler({ ownerId: ctx.ownerId, args: tc.arguments, db, store });
+          const handlerResult = await toolDef.handler({
+            ownerId: ctx.ownerId,
+            args: tc.arguments,
+            db,
+            store,
+            context: {
+              projectId: task.projectId,
+              actorType: ctx.actorType,
+              actorId: ctx.actorId,
+              agentId: ctx.agentId ?? null,
+              taskId: task.id,
+              environment: intent.environment ?? 'development',
+            },
+          });
           messages.push({
             role: 'tool',
             content: JSON.stringify(handlerResult),

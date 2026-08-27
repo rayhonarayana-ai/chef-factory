@@ -1,5 +1,6 @@
-// CHEF FACTORY — Gate 3 → Gate 6 — Tool registry exports.
+// CHEF FACTORY — Gate 3 → Gate 6 → Gate 35A — Tool registry exports.
 // Gate 3: 5 initial tools. Gate 6: adds query_data for Data Intelligence.
+// Gate 35A: adds 5 secure software-engineering tools.
 
 export { createProjectHandler } from './create-project.js';
 export { listProjectsHandler } from './list-projects.js';
@@ -7,6 +8,11 @@ export { listTasksHandler } from './list-tasks.js';
 export { createTaskHandler } from './create-task.js';
 export { updateTaskHandler } from './update-task.js';
 export { queryDataHandler } from './query-data.js';
+export { listDirectoryHandler } from '../software/tools/listDirectory.js';
+export { readFileHandler } from '../software/tools/readFile.js';
+export { searchTextHandler } from '../software/tools/searchText.js';
+export { applyPatchHandler } from '../software/tools/applyPatch.js';
+export { createFileHandler } from '../software/tools/createFile.js';
 
 import type { ToolDefinition } from './types.js';
 import { createProjectHandler } from './create-project.js';
@@ -15,6 +21,11 @@ import { listTasksHandler } from './list-tasks.js';
 import { createTaskHandler } from './create-task.js';
 import { updateTaskHandler } from './update-task.js';
 import { QUERY_DATA_TOOL, queryDataHandler } from './query-data.js';
+import { listDirectoryHandler } from '../software/tools/listDirectory.js';
+import { readFileHandler } from '../software/tools/readFile.js';
+import { searchTextHandler } from '../software/tools/searchText.js';
+import { applyPatchHandler } from '../software/tools/applyPatch.js';
+import { createFileHandler } from '../software/tools/createFile.js';
 
 export const GATE3_TOOLS: ToolDefinition[] = [
   {
@@ -104,6 +115,90 @@ export const GATE3_TOOLS: ToolDefinition[] = [
   {
     ...QUERY_DATA_TOOL,
     handler: queryDataHandler,
+  },
+  // Gate 35A — Secure Software Engineering Tools
+  {
+    name: 'list_directory',
+    description: 'List files and directories within the approved project workspace. Returns bounded results with protected paths omitted.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Relative path within workspace (default: workspace root)' },
+        depth: { type: 'number', description: 'Recursion depth (default: 1, max: 5)' },
+      },
+      required: [],
+    },
+    riskLevel: 'low' as const,
+    actionType: 'software.file.read',
+    requiresApproval: false,
+    handler: listDirectoryHandler,
+  },
+  {
+    name: 'search_text',
+    description: 'Search file contents within the approved project workspace using regex. Protected paths excluded. Results bounded.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Regex pattern to search for' },
+        path: { type: 'string', description: 'Relative directory to search within (default: workspace root)' },
+        maxResults: { type: 'number', description: 'Maximum results to return (default: 50, max: 50)' },
+      },
+      required: ['query'],
+    },
+    riskLevel: 'low' as const,
+    actionType: 'software.file.search',
+    requiresApproval: false,
+    handler: searchTextHandler,
+  },
+  {
+    name: 'read_file',
+    description: 'Read a text source file within the approved project workspace. Protected paths denied. Binary files rejected. Output marked untrusted.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Relative file path within workspace' },
+        offset: { type: 'number', description: 'Line number to start reading from (0-indexed)' },
+        limit: { type: 'number', description: 'Maximum number of lines to read' },
+      },
+      required: ['path'],
+    },
+    riskLevel: 'low' as const,
+    actionType: 'software.file.read',
+    requiresApproval: false,
+    handler: readFileHandler,
+  },
+  {
+    name: 'apply_patch',
+    description: 'Replace file content with new content. Requires expectedContentHash for CAS. Advisory-locked. Pre-write DLP enforced. Returns conflict if file was modified since last read.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Relative file path within workspace' },
+        patch: { type: 'string', description: 'Complete new file content' },
+        expectedContentHash: { type: 'string', description: 'SHA-256 hash of current file content (from read_file)' },
+      },
+      required: ['path', 'patch', 'expectedContentHash'],
+    },
+    riskLevel: 'medium' as const,
+    actionType: 'software.file.write',
+    requiresApproval: false,
+    handler: applyPatchHandler,
+  },
+  {
+    name: 'create_file',
+    description: 'Create a new file within the approved project workspace. Exclusive creation — fails if file already exists. DLP enforced.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Relative file path within workspace' },
+        content: { type: 'string', description: 'File content to write' },
+      },
+      required: ['path', 'content'],
+    },
+    riskLevel: 'medium' as const,
+    actionType: 'software.file.write',
+    requiresApproval: false,
+    handler: createFileHandler,
   },
 ];
 
