@@ -72,7 +72,8 @@ export type CriticalActionClassification =
   | 'agent'
   | 'security'
   | 'memory'
-  | 'verification';
+  | 'verification'
+  | 'git_commit';
 
 export interface CriticalActionRule {
   action: string;

@@ -31,11 +31,31 @@ function makeCtx(overrides: Partial<ToolExecutionContext> = {}): ToolExecutionCo
   };
 }
 
+/**
+ * Stub DbQuery: no-ops advisory lock statements and succeeds on the
+ * audit_events attribution INSERT, so fail-closed handlers report success
+ * while exercising real filesystem mutations.
+ */
+function createStubDb(): import('../tools/types.js').DbQuery {
+  return {
+    query: async (sql: string) => {
+      if (/pg_advisory_lock|pg_advisory_unlock/i.test(sql)) {
+        return { rows: [{ pg_advisory_lock: null }] };
+      }
+      if (/INSERT INTO audit_events/i.test(sql)) {
+        return { rows: [] };
+      }
+      return { rows: [] };
+    },
+  };
+}
+
 function makeInput(args: Record<string, unknown> = {}, ctxOverrides: Partial<ToolExecutionContext> = {}): ToolHandlerInput {
   return {
     ownerId: 'live-test-owner',
     args,
     context: makeCtx(ctxOverrides),
+    db: createStubDb(),
     store: {
       getPassport: async () => ({
         projectId: 'live-test-project',

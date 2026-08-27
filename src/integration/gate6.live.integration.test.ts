@@ -637,8 +637,8 @@ describe.skipIf(!enabled)('Gate 6 — Live Verification (query_data against real
     expect(queryTools.length).toBe(1);
   });
 
-  it('T18b: 6 total tools registered', () => {
-    expect(GATE3_TOOLS.length).toBe(6);
+  it('T18b: 16 total tools registered', () => {
+    expect(GATE3_TOOLS.length).toBe(16);
   });
 
   it('T18c: query_data appears in OpenAI tools format', () => {

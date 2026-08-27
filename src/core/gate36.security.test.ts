@@ -134,8 +134,8 @@ describe('Gate 36 V1 — COMMAND SAFETY', () => {
     expect(runnerSource).toContain('spawn(gitExe,');
     // Must NOT have a hardcoded 'git' spawn (except in resolveGitExecutable)
     const spawnLines = runnerSource.split('\n').filter((l) => l.includes('spawn('));
-    // Only one spawn call, in runGit function, using gitExe variable
-    expect(spawnLines.length).toBe(1);
+    // Two spawn calls: runGit and runGitWithIndex, both using gitExe variable
+    expect(spawnLines.length).toBe(2);
   });
 
   it('C14: runner uses statSync from import, not require', () => {
@@ -437,8 +437,10 @@ describe('Gate 36 V1 — NETWORK/WRITE', () => {
     expect(GATE3_TOOLS.find((t) => t.name === 'git_stage')).toBeUndefined();
   });
 
-  it('W48: no git_commit tool', () => {
-    expect(GATE3_TOOLS.find((t) => t.name === 'git_commit')).toBeUndefined();
+  it('W48: git_commit exists and is properly gated', () => {
+    const gitCommit = GATE3_TOOLS.find((t) => t.name === 'git_commit');
+    expect(gitCommit).toBeDefined();
+    expect(gitCommit!.actionType).toBe('software.git.commit');
   });
 
   it('W49: no git_checkout tool', () => {
@@ -478,8 +480,8 @@ describe('Gate 36 V1 — CONSTANTS', () => {
 // ===================== REGRESSION =====================
 
 describe('Gate 36 V1 — REGRESSION', () => {
-  it('RG1: Gate 36 tools total is 14', () => {
-    expect(GATE3_TOOLS.length).toBe(14);
+  it('RG1: Gate 36 tools total is 16', () => {
+    expect(GATE3_TOOLS.length).toBe(16);
   });
 
   it('RG2: all original tools still present', () => {

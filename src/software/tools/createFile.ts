@@ -1,17 +1,20 @@
-// CHEF FACTORY — Gate 35A — create_file tool.
+// CHEF FACTORY — Gate 35A → Gate 36 V2 — create_file tool.
 // Controlled file creation. Exclusive create (O_CREAT | O_EXCL).
 // Advisory lock + workspace validation + protected path + DLP.
+// Gate 36 V2: Attribution recorded inside lock critical section.
 // CREATE_FILE_EXCLUSIVE = YES
 // EXISTING_TARGET_OVERWRITTEN = NO
 
 import type { ToolHandlerInput, ToolHandlerResult } from '../../tools/types.js';
+import type { Pool } from 'pg';
 import { getPool } from '../../db/pool.js';
 import { stat } from 'node:fs/promises';
 import { resolveWorkspace, validateRelativePath } from '../types.js';
-import { withFileLock, exclusiveCreate } from '../../workspace/mutation.js';
+import { withFileLockAndDb, exclusiveCreate } from '../../workspace/mutation.js';
 import { scanForSecrets } from '../dlpscan.js';
 import { MAX_FILE_WRITE_SIZE } from '../../workspace/types.js';
 import type { Store } from '../../core/ports.js';
+import { contentHash } from '../../workspace/mutation.js';
 
 export async function createFileHandler(input: ToolHandlerInput): Promise<ToolHandlerResult> {
   const { ownerId, args } = input;
@@ -30,10 +33,14 @@ export async function createFileHandler(input: ToolHandlerInput): Promise<ToolHa
     return { success: false, error: `content too large: ${content.length} bytes (max ${MAX_FILE_WRITE_SIZE})` };
   }
 
-  const pool = getPool();
+  // Gate 36 V2: use injected db (unit-test seam) or the real pool.
+  // The injected db supplies the audit_events INSERT so fail-closed behavior
+  // is deterministically testable without real DB FK rows.
+  const lockDb: Pool | import('../../tools/types.js').DbQuery = input.db ?? getPool();
+  const ctx = input.context!;
 
   try {
-    const result = await withFileLock(pool, workspace.workspaceRoot, targetPath, async () => {
+    const result = await withFileLockAndDb(lockDb, workspace.workspaceRoot, targetPath, async (db) => {
       // Step 1: Validate path against workspace and protected policy
       const pathCheck = validateRelativePath(targetPath, workspace);
       if (!pathCheck.ok) {
@@ -71,12 +78,56 @@ export async function createFileHandler(input: ToolHandlerInput): Promise<ToolHa
       // Step 5: Verify
       const info = await stat(pathCheck.canonical!);
 
+      // Step 6: Compute resultingHash
+      const resultingHash = contentHash(content);
+
+      // Step 7: Record attribution (Gate 36 V2) — same DB connection, same lock boundary
+      // FAIL CLOSED: if attribution persistence fails after filesystem mutation,
+      // the handler MUST return failure. FILESYSTEM_MUTATION_SUCCESS +
+      // ATTRIBUTION_PERSISTENCE_FAILURE MUST NOT return success.
+      const canonicalRelative = pathCheck.relative!;
+      try {
+        await db.query(
+          `INSERT INTO audit_events
+           (actor_type, actor_id, action, project_id, environment_id,
+            resource_type, resource_id, task_id, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            'agent',
+            ctx.agentId,
+            'file.created',
+            ctx.projectId,
+            ctx.environment,
+            'file',
+            canonicalRelative,
+            ctx.taskId,
+            JSON.stringify({ operation: 'create_file', resultingHash }),
+          ],
+        );
+      } catch {
+        // FAIL CLOSED: file was mutated but attribution could not be persisted.
+        // Return failure. No synthetic attribution. File remains stage-ineligible
+        // until a later authorized CHEF mutation establishes valid fresh attribution.
+        // No automatic filesystem rollback (distributed transaction crash window is
+        // acknowledged; destructive rollback is NOT performed).
+        return {
+          success: false,
+          error: 'attribution_persistence_failed',
+          data: {
+            outcome: 'mutation_without_attribution',
+            path: targetPath,
+            resultingHash,
+          },
+        };
+      }
+
       return {
         success: true,
         data: {
           outcome: 'created',
           path: targetPath,
           size: info.size,
+          resultingHash,
         },
       };
     });

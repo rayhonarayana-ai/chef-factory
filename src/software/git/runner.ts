@@ -232,6 +232,129 @@ export async function runGit(input: GitRunnerInput): Promise<GitResult> {
   };
 }
 
+/**
+ * Gate 36 V2 — Run a Git operation using an alternate GIT_INDEX_FILE.
+ * Used for temp-index staging: does NOT touch the real index.
+ * Spawns with GIT_INDEX_FILE set to a temp file, so the working tree is untouched.
+ * After the process exits, the temp file is NOT cleaned up (caller manages).
+ */
+export async function runGitWithIndex(
+  subcommand: string,
+  extraArgs: readonly string[],
+  cwd: string,
+  indexFile: string,
+  signal?: AbortSignal,
+): Promise<GitResult> {
+  const startTime = Date.now();
+
+  const gitDir = join(cwd, '.git');
+  if (!existsSync(gitDir)) {
+    return makeResult('not_repository', subcommand, null, startTime, false, 0, '',
+      'not a git repository: .git directory not found');
+  }
+
+  const gitExe = resolveGitExecutable();
+  const emptyDir = getTrustedEmptyDir();
+  const configOverrides = [
+    '-c', `core.hooksPath=${emptyDir}`,
+    '-c', 'credential.helper=',
+    '-c', 'core.pager=',
+    '-c', 'diff.external=',
+    '-c', 'core.fsmonitor=false',
+    '-c', 'diff.textconv=',
+  ];
+
+  const fullArgs = [...configOverrides, subcommand, ...extraArgs];
+  const childEnv = buildGitChildEnv(process.env, indexFile);
+
+  const timeoutMs = GIT_CONSTANTS.DEFAULT_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  if (signal) {
+    signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+
+  let child: ChildProcess;
+  try {
+    child = spawn(gitExe, fullArgs, {
+      cwd,
+      env: childEnv,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      signal: controller.signal,
+    });
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (isAbortError(e)) {
+      return makeResult('timeout', subcommand, null, startTime, true, 0, '', '');
+    }
+    return makeResult('internal_error', subcommand, null, startTime, false, 0, '', String(e));
+  }
+
+  let stdout = '';
+  let stderr = '';
+  let stdoutTruncated = false;
+  let stderrTruncated = false;
+
+  child.stdout?.on('data', (chunk: Buffer | string) => {
+    const data = String(chunk);
+    if (stdout.length + data.length > GIT_CONSTANTS.MAX_STDOUT_BYTES) {
+      const remaining = GIT_CONSTANTS.MAX_STDOUT_BYTES - stdout.length;
+      if (remaining > 0) stdout += data.slice(0, remaining);
+      stdoutTruncated = true;
+      child.stdout?.destroy();
+    } else {
+      stdout += data;
+    }
+  });
+
+  child.stderr?.on('data', (chunk: Buffer | string) => {
+    const data = String(chunk);
+    if (stderr.length + data.length > GIT_CONSTANTS.MAX_STDERR_BYTES) {
+      const remaining = GIT_CONSTANTS.MAX_STDERR_BYTES - stderr.length;
+      if (remaining > 0) stderr += data.slice(0, remaining);
+      stderrTruncated = true;
+      child.stderr?.destroy();
+    } else {
+      stderr += data;
+    }
+  });
+
+  const exitCode = await new Promise<number | null>((resolve) => {
+    child.on('close', (code) => resolve(code));
+    child.on('error', () => resolve(null));
+  });
+
+  clearTimeout(timeoutId);
+  const durationMs = Date.now() - startTime;
+  const timedOut = controller.signal.aborted;
+
+  let outcome: GitOutcome;
+  if (timedOut) {
+    outcome = 'timeout';
+  } else if (stdoutTruncated || stderrTruncated) {
+    outcome = 'output_limit_exceeded';
+  } else if (exitCode === 0) {
+    outcome = 'ok';
+  } else {
+    outcome = 'git_failed';
+  }
+
+  return {
+    ok: outcome === 'ok',
+    outcome,
+    operation: subcommand,
+    exitCode,
+    timedOut,
+    durationMs,
+    stdout: redactText(stdout),
+    stderr: redactText(stderr),
+    truncated: stdoutTruncated || stderrTruncated,
+    fileCount: null,
+  };
+}
+
 function makeResult(
   outcome: GitOutcome,
   operation: string,

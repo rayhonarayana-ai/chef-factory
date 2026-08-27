@@ -4,7 +4,7 @@ import type { ToolDefinition } from './types.js';
 
 describe('Gate 3 — Tool Registry', () => {
   it('registers exactly 14 tools (6 core + 5 workspace/software + 1 verification + 2 git)', () => {
-    expect(GATE3_TOOLS.length).toBe(14);
+    expect(GATE3_TOOLS.length).toBe(16);
   });
 
   it('each tool has required fields', () => {
@@ -25,7 +25,9 @@ describe('Gate 3 — Tool Registry', () => {
       'create_file',
       'create_project',
       'create_task',
+      'git_commit',
       'git_diff',
+      'git_prepare_commit',
       'git_status',
       'list_directory',
       'list_projects',
@@ -40,7 +42,7 @@ describe('Gate 3 — Tool Registry', () => {
 
   it('toOpenAITools produces correct format', () => {
     const openai = toOpenAITools(GATE3_TOOLS);
-    expect(openai.length).toBe(14);
+    expect(openai.length).toBe(16);
     for (const tool of openai) {
       expect(tool.type).toBe('function');
       const fn = tool.function as Record<string, unknown>;
@@ -52,7 +54,7 @@ describe('Gate 3 — Tool Registry', () => {
 
   it('toAnthropicTools produces correct format', () => {
     const anthropic = toAnthropicTools(GATE3_TOOLS);
-    expect(anthropic.length).toBe(14);
+    expect(anthropic.length).toBe(16);
     for (const tool of anthropic) {
       expect(tool.name).toBeTruthy();
       expect(tool.description).toBeTruthy();
@@ -62,7 +64,7 @@ describe('Gate 3 — Tool Registry', () => {
 
   it('toGoogleTools produces correct format', () => {
     const google = toGoogleTools(GATE3_TOOLS);
-    expect(google.length).toBe(14);
+    expect(google.length).toBe(16);
     for (const tool of google) {
       expect(tool.name).toBeTruthy();
       expect(tool.description).toBeTruthy();

@@ -354,7 +354,7 @@ describe('Gate 35B — REGRESSION', () => {
   });
 
   it('R52: total tool count updated correctly', () => {
-    expect(GATE3_TOOLS.length).toBe(14);
+    expect(GATE3_TOOLS.length).toBe(16);
   });
 });
 

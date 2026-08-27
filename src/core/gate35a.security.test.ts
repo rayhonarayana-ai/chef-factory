@@ -43,6 +43,26 @@ function makeInput(args: Record<string, unknown> = {}, ctxOverrides: Partial<Too
     args,
     context: makeCtx(ctxOverrides),
     store: createMockStore(),
+    db: createStubDb(),
+  };
+}
+
+/**
+ * Stub DbQuery: no-ops advisory lock statements and succeeds on the
+ * audit_events attribution INSERT. Optionally throws on INSERT to simulate
+ * attribution persistence failure (used by fail-closed tests).
+ */
+function createStubDb(): import('../tools/types.js').DbQuery {
+  return {
+    query: async (sql: string) => {
+      if (/pg_advisory_lock|pg_advisory_unlock/i.test(sql)) {
+        return { rows: [{ pg_advisory_lock: null }] };
+      }
+      if (/INSERT INTO audit_events/i.test(sql)) {
+        return { rows: [] };
+      }
+      return { rows: [] };
+    },
   };
 }
 
@@ -674,6 +694,106 @@ describe('Gate 35A: AUDIT', () => {
 });
 
 // ============================================================
+// Group V2: FAIL-CLOSED ATTRIBUTION (Gate 36 V2)
+// ============================================================
+
+describe('Gate 36 V2: FAIL-CLOSED ATTRIBUTION', () => {
+  function failingDb(): import('../tools/types.js').DbQuery {
+    return {
+      query: async (sql: string) => {
+        if (/pg_advisory_lock|pg_advisory_unlock/i.test(sql)) {
+          return { rows: [{ pg_advisory_lock: null }] };
+        }
+        if (/INSERT INTO audit_events/i.test(sql)) {
+          throw new Error('attribution insert failed');
+        }
+        return { rows: [] };
+      },
+    };
+  }
+
+  it('V2-1: create_file fails when attribution persistence fails (file may remain)', async () => {
+    const testFile = 'src/v2-fail-create.ts';
+    const fullPath = join(workspaceDir, testFile);
+    try {
+      const input: ToolHandlerInput = { ...makeInput({ path: testFile, content: 'export const v = 1;\n' }), db: failingDb() };
+      const result = await createFileHandler(input);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('attribution_persistence_failed');
+      // No synthetic success; file may or may not exist on disk (crash window acknowledged)
+    } finally {
+      try { await rm(fullPath, { force: true }); } catch { /* cleanup */ }
+    }
+  });
+
+  it('V2-2: apply_patch fails when attribution persistence fails (file may retain new state)', async () => {
+    const testFile = 'src/v2-fail-patch.ts';
+    const fullPath = join(workspaceDir, testFile);
+    try {
+      await writeFile(fullPath, 'original\n');
+      const hash = contentHash('original\n');
+      const input: ToolHandlerInput = {
+        ...makeInput({ path: testFile, patch: 'new-state\n', expectedContentHash: hash }),
+        db: failingDb(),
+      };
+      const result = await applyPatchHandler(input);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('attribution_persistence_failed');
+    } finally {
+      try { await rm(fullPath, { force: true }); } catch { /* cleanup */ }
+    }
+  });
+
+  it('V2-3: create_file with working db returns success', async () => {
+    const testFile = 'src/v2-ok-create.ts';
+    const fullPath = join(workspaceDir, testFile);
+    try {
+      const result = await createFileHandler(makeInput({ path: testFile, content: 'export const ok = 1;\n' }));
+      expect(result.success).toBe(true);
+      const content = await readFile(fullPath, 'utf8');
+      expect(content).toBe('export const ok = 1;\n');
+    } finally {
+      try { await rm(fullPath, { force: true }); } catch { /* cleanup */ }
+    }
+  });
+
+  it('V2-4: apply_patch with working db returns success', async () => {
+    const testFile = 'src/v2-ok-patch.ts';
+    const fullPath = join(workspaceDir, testFile);
+    try {
+      await writeFile(fullPath, 'one\n');
+      const hash = contentHash('one\n');
+      const result = await applyPatchHandler(makeInput({
+        path: testFile,
+        patch: 'one updated\n',
+        expectedContentHash: hash,
+      }));
+      expect(result.success).toBe(true);
+      const content = await readFile(fullPath, 'utf8');
+      expect(content).toBe('one updated\n');
+    } finally {
+      try { await rm(fullPath, { force: true }); } catch { /* cleanup */ }
+    }
+  });
+
+  it('V2-5: attribution failure is not converted to a successful mutation result', async () => {
+    const testFile = 'src/v2-noconvert.ts';
+    const fullPath = join(workspaceDir, testFile);
+    try {
+      const input: ToolHandlerInput = { ...makeInput({ path: testFile, content: 'x\n' }), db: failingDb() };
+      const result = await createFileHandler(input);
+      expect(result.success).toBe(false);
+      // Must not report a created/executed outcome
+      if (result.data && typeof result.data === 'object' && 'outcome' in result.data) {
+        expect((result.data as { outcome?: string }).outcome).not.toBe('created');
+      }
+    } finally {
+      try { await rm(fullPath, { force: true }); } catch { /* cleanup */ }
+    }
+  });
+});
+
+// ============================================================
 // Group P: REGRESSION (3 tests)
 // ============================================================
 
@@ -700,6 +820,6 @@ describe('Gate 35A: REGRESSION', () => {
 
   it('P3: total tool count is 14 (6 existing + 5 workspace + 1 verification + 2 git)', async () => {
     const { GATE3_TOOLS } = await import('../tools/index.js');
-    expect(GATE3_TOOLS.length).toBe(14);
+    expect(GATE3_TOOLS.length).toBe(16);
   });
 });

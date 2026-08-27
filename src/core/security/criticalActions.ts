@@ -42,6 +42,9 @@ export const CRITICAL_ACTIONS: readonly CriticalActionRule[] = [
   // Gate 36 V1 — Secure Read-Only Version Control
   { action: 'software.git.status', classification: 'verification', defaultDecision: 'allow', environments: ['development', 'staging'], description: 'Reading git working tree status in approved workspace. Read-only.', isCore: true },
   { action: 'software.git.diff', classification: 'verification', defaultDecision: 'allow', environments: ['development', 'staging'], description: 'Reading git diff in approved workspace. Read-only.', isCore: true },
+  // Gate 36 V2 — Controlled Staging and Verified Commit
+  { action: 'software.git.stage', classification: 'git_commit', defaultDecision: 'require_approval', environments: ['development', 'staging'], description: 'Preparing a git commit with state-bound attribution and human approval.', isCore: true },
+  { action: 'software.git.commit', classification: 'git_commit', defaultDecision: 'require_approval', environments: ['development', 'staging'], description: 'Executing a human-approved git commit via temp index.', isCore: true },
   // Deferred (INERT — memory backend not yet implemented)
   { action: 'memory_write', classification: 'memory', defaultDecision: 'allow', environments: 'all', description: 'Writing to memory backend (deferred).', isCore: true },
   { action: 'memory_delete', classification: 'memory', defaultDecision: 'allow', environments: 'all', description: 'Deleting from memory backend (deferred).', isCore: true },

@@ -1,7 +1,8 @@
-// CHEF FACTORY — Gate 3 → Gate 6 → Gate 35A → Gate 36 V1 — Tool registry exports.
+// CHEF FACTORY — Gate 3 → Gate 6 → Gate 35A → Gate 36 V1 → Gate 36 V2 — Tool registry exports.
 // Gate 3: 5 initial tools. Gate 6: adds query_data for Data Intelligence.
 // Gate 35A: adds 5 secure software-engineering tools.
 // Gate 36 V1: adds git_status and git_diff for secure read-only version control.
+// Gate 36 V2: adds git_prepare_commit and git_commit for controlled staging and verified commit.
 
 export { createProjectHandler } from './create-project.js';
 export { listProjectsHandler } from './list-projects.js';
@@ -17,6 +18,8 @@ export { createFileHandler } from '../software/tools/createFile.js';
 export { runVerificationHandler } from '../software/tools/runVerification.js';
 export { gitStatusHandler } from '../software/tools/gitStatus.js';
 export { gitDiffHandler } from '../software/tools/gitDiff.js';
+export { gitPrepareCommitHandler } from '../software/tools/gitPrepareCommit.js';
+export { gitCommitHandler } from '../software/tools/gitCommit.js';
 
 import type { ToolDefinition } from './types.js';
 import { createProjectHandler } from './create-project.js';
@@ -33,6 +36,8 @@ import { createFileHandler } from '../software/tools/createFile.js';
 import { runVerificationHandler } from '../software/tools/runVerification.js';
 import { gitStatusHandler } from '../software/tools/gitStatus.js';
 import { gitDiffHandler } from '../software/tools/gitDiff.js';
+import { gitPrepareCommitHandler } from '../software/tools/gitPrepareCommit.js';
+import { gitCommitHandler } from '../software/tools/gitCommit.js';
 
 export const GATE3_TOOLS: ToolDefinition[] = [
   {
@@ -252,6 +257,37 @@ export const GATE3_TOOLS: ToolDefinition[] = [
     actionType: 'software.git.diff',
     requiresApproval: false,
     handler: gitDiffHandler,
+  },
+  // Gate 36 V2 — Controlled Staging and Verified Commit
+  {
+    name: 'git_prepare_commit',
+    description: 'Prepare a commit by validating file attribution, computing fingerprints, running DLP, and creating an approval for human review. Operates under repo-level lock. Staging is internal — no agent-visible git_stage.',
+    parameters: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', description: 'Commit message (3-500 chars)' },
+      },
+      required: ['message'],
+    },
+    riskLevel: 'high' as const,
+    actionType: 'software.git.stage',
+    requiresApproval: false,
+    handler: gitPrepareCommitHandler,
+  },
+  {
+    name: 'git_commit',
+    description: 'Execute a human-approved commit using temp index. Revalidates all state, stages via alternate GIT_INDEX_FILE, commits. No push.',
+    parameters: {
+      type: 'object',
+      properties: {
+        approval_id: { type: 'string', description: 'ID of the approved git_prepare_commit approval' },
+      },
+      required: ['approval_id'],
+    },
+    riskLevel: 'critical' as const,
+    actionType: 'software.git.commit',
+    requiresApproval: false,
+    handler: gitCommitHandler,
   },
 ];
 

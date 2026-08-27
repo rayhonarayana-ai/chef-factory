@@ -102,8 +102,9 @@ export function getTrustedGlobalConfigPath(): string {
  * All GIT_* dangerous variables are stripped.
  * GIT_CONFIG_GLOBAL → trusted empty file (not user's real config).
  * GIT_CONFIG_NOSYSTEM=1 → system config disabled.
+ * GIT_INDEX_FILE → optional alternate index for temp-index staging.
  */
-export function buildGitChildEnv(currentEnv: NodeJS.ProcessEnv = process.env): Record<string, string> {
+export function buildGitChildEnv(currentEnv: NodeJS.ProcessEnv = process.env, altIndexFile?: string): Record<string, string> {
   const childEnv: Record<string, string> = {};
 
   for (const key of GIT_CHILD_ENV_ALLOWLIST) {
@@ -130,6 +131,11 @@ export function buildGitChildEnv(currentEnv: NodeJS.ProcessEnv = process.env): R
 
   // Force GIT_EDITOR to a no-op to prevent editor launch
   childEnv['GIT_EDITOR'] = 'true';
+
+  // Gate 36 V2: optional alternate index file for temp-index staging
+  if (altIndexFile) {
+    childEnv['GIT_INDEX_FILE'] = altIndexFile;
+  }
 
   return childEnv;
 }

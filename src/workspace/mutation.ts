@@ -24,6 +24,55 @@ export function fileLockKeys(workspaceRoot: string, relativePath: string): [numb
 }
 
 /**
+ * Gate 36 V2 — Derive repo-level advisory lock keys.
+ * Scoped to workspace root only (not per-file).
+ */
+export function repoLockKeys(workspaceRoot: string): [number, number] {
+  const input = `git-repo:${workspaceRoot}`;
+  const hash = createHash('sha256').update(input).digest();
+  const key1 = hash.readInt32BE(0);
+  const key2 = hash.readInt32BE(4);
+  return [key1, key2];
+}
+
+/**
+ * Gate 36 V2 — Execute within a repo-level advisory lock.
+ * Used by git_prepare_commit and git_commit.
+ */
+export async function withRepoLock<T>(
+  poolOrDb: Pool | DbQuery,
+  workspaceRoot: string,
+  fn: (db: DbQuery) => Promise<T>,
+): Promise<T> {
+  const [key1, key2] = repoLockKeys(workspaceRoot);
+
+  if ('connect' in poolOrDb && typeof poolOrDb.connect === 'function') {
+    const pool = poolOrDb as Pool;
+    const client = await pool.connect();
+    try {
+      await client.query('SELECT pg_advisory_lock($1, $2)', [key1, key2]);
+      try {
+        return await fn({
+          query: (sql: string, params?: unknown[]) => client.query(sql, params) as Promise<{ rows: Record<string, unknown>[] }>,
+        });
+      } finally {
+        await client.query('SELECT pg_advisory_unlock($1, $2)', [key1, key2]);
+      }
+    } finally {
+      client.release();
+    }
+  } else {
+    const db = poolOrDb as DbQuery;
+    await db.query('SELECT pg_advisory_lock($1, $2)', [key1, key2]);
+    try {
+      return await fn(db);
+    } finally {
+      await db.query('SELECT pg_advisory_unlock($1, $2)', [key1, key2]);
+    }
+  }
+}
+
+/**
  * Compute SHA-256 content hash of a string.
  */
 export function contentHash(content: string): string {
@@ -61,6 +110,46 @@ export async function withFileLock<T>(
     await db.query('SELECT pg_advisory_lock($1, $2)', [key1, key2]);
     try {
       return await fn();
+    } finally {
+      await db.query('SELECT pg_advisory_unlock($1, $2)', [key1, key2]);
+    }
+  }
+}
+
+/**
+ * Gate 36 V2 — Execute a function within a PostgreSQL advisory lock,
+ * exposing the same Pool client to the callback for attribution queries.
+ * The callback receives (client) so it can run attribution INSERTs/SELECTs
+ * on the same connection that holds the lock.
+ */
+export async function withFileLockAndDb<T>(
+  poolOrDb: Pool | DbQuery,
+  workspaceRoot: string,
+  relativePath: string,
+  fn: (db: DbQuery) => Promise<T>,
+): Promise<T> {
+  const [key1, key2] = fileLockKeys(workspaceRoot, relativePath);
+
+  if ('connect' in poolOrDb && typeof poolOrDb.connect === 'function') {
+    const pool = poolOrDb as Pool;
+    const client = await pool.connect();
+    try {
+      await client.query('SELECT pg_advisory_lock($1, $2)', [key1, key2]);
+      try {
+        return await fn({
+          query: (sql: string, params?: unknown[]) => client.query(sql, params) as Promise<{ rows: Record<string, unknown>[] }>,
+        });
+      } finally {
+        await client.query('SELECT pg_advisory_unlock($1, $2)', [key1, key2]);
+      }
+    } finally {
+      client.release();
+    }
+  } else {
+    const db = poolOrDb as DbQuery;
+    await db.query('SELECT pg_advisory_lock($1, $2)', [key1, key2]);
+    try {
+      return await fn(db);
     } finally {
       await db.query('SELECT pg_advisory_unlock($1, $2)', [key1, key2]);
     }
