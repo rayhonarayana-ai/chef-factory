@@ -1,6 +1,7 @@
-// CHEF FACTORY — Gate 3 → Gate 6 → Gate 35A — Tool registry exports.
+// CHEF FACTORY — Gate 3 → Gate 6 → Gate 35A → Gate 36 V1 — Tool registry exports.
 // Gate 3: 5 initial tools. Gate 6: adds query_data for Data Intelligence.
 // Gate 35A: adds 5 secure software-engineering tools.
+// Gate 36 V1: adds git_status and git_diff for secure read-only version control.
 
 export { createProjectHandler } from './create-project.js';
 export { listProjectsHandler } from './list-projects.js';
@@ -14,6 +15,8 @@ export { searchTextHandler } from '../software/tools/searchText.js';
 export { applyPatchHandler } from '../software/tools/applyPatch.js';
 export { createFileHandler } from '../software/tools/createFile.js';
 export { runVerificationHandler } from '../software/tools/runVerification.js';
+export { gitStatusHandler } from '../software/tools/gitStatus.js';
+export { gitDiffHandler } from '../software/tools/gitDiff.js';
 
 import type { ToolDefinition } from './types.js';
 import { createProjectHandler } from './create-project.js';
@@ -28,6 +31,8 @@ import { searchTextHandler } from '../software/tools/searchText.js';
 import { applyPatchHandler } from '../software/tools/applyPatch.js';
 import { createFileHandler } from '../software/tools/createFile.js';
 import { runVerificationHandler } from '../software/tools/runVerification.js';
+import { gitStatusHandler } from '../software/tools/gitStatus.js';
+import { gitDiffHandler } from '../software/tools/gitDiff.js';
 
 export const GATE3_TOOLS: ToolDefinition[] = [
   {
@@ -218,6 +223,35 @@ export const GATE3_TOOLS: ToolDefinition[] = [
     actionType: 'software.verification.execute',
     requiresApproval: false,
     handler: runVerificationHandler,
+  },
+  // Gate 36 V1 — Secure Read-Only Version Control
+  {
+    name: 'git_status',
+    description: 'Show the working tree status of the project repository. Returns porcelain-format output with file change summary. Read-only — does not modify the index or working tree.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+    riskLevel: 'low' as const,
+    actionType: 'software.git.status',
+    requiresApproval: false,
+    handler: gitStatusHandler,
+  },
+  {
+    name: 'git_diff',
+    description: 'Show differences in the project repository. Agent selects mode only (working, cached, stat). All flags resolved server-side. Read-only.',
+    parameters: {
+      type: 'object',
+      properties: {
+        mode: { type: 'string', description: 'Diff mode', enum: ['working', 'cached', 'stat'] },
+      },
+      required: [],
+    },
+    riskLevel: 'low' as const,
+    actionType: 'software.git.diff',
+    requiresApproval: false,
+    handler: gitDiffHandler,
   },
 ];
 
