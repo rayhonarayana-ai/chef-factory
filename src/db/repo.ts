@@ -179,6 +179,31 @@ export class SupabaseStore implements Store {
     );
   }
 
+  // Gate 37: Deterministic discovery of schedulable tasks.
+  // DISCOVERY ONLY — owner/project scoped, unassigned, queued, within retry cap.
+  // Never assigns, claims, mutates, or grants authority. Placement is the caller's
+  // responsibility via placeTask (atomic authority). Ordering: created_at asc, id asc.
+  async listSchedulableTasks(ownerId: string, filter?: { projectId?: string; limit?: number }): Promise<TaskRecord[]> {
+    const conds = [
+      'owner_id = $1',
+      'agent_id is null',
+      `status = 'queued'`,
+      'attempts < coalesce(max_attempts, 3)',
+    ];
+    const params: unknown[] = [ownerId];
+    if (filter?.projectId) {
+      params.push(filter.projectId);
+      conds.push(`project_id = $${params.length}`);
+    }
+    let sql = `select * from public.tasks where ${conds.join(' and ')} order by created_at asc, id asc`;
+    if (filter?.limit !== undefined) {
+      params.push(filter.limit);
+      sql += ` limit $${params.length}`;
+    }
+    const res = await this.q<TaskRecord>(sql, params);
+    return res.map((r) => ({ ...r }));
+  }
+
   async patchTask(ownerId: string, taskId: string, patch: import('../core/ports.js').TaskPatch): Promise<TaskRecord> {
     if (patch.agentId !== undefined && patch.agentId !== null) {
       const agent = await this.getAgent(ownerId, patch.agentId);

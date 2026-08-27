@@ -168,6 +168,9 @@ export interface Store {
   }): Promise<TaskRecord>;
   getTask(ownerId: string, taskId: string): Promise<TaskRecord | null>;
   listTasks(ownerId: string, filter?: { projectId?: string; status?: TaskRecord['status'] }): Promise<TaskRecord[]>;
+  // Gate 37: deterministic discovery of unassigned schedulable tasks.
+  // DISCOVERY ONLY — never assigns, claims, mutates, or grants authority.
+  listSchedulableTasks(ownerId: string, filter?: { projectId?: string; limit?: number }): Promise<TaskRecord[]>;
   patchTask(ownerId: string, taskId: string, patch: TaskPatch): Promise<TaskRecord>;
   assignTask(ownerId: string, taskId: string, agentId: string | null): Promise<AssignTaskResult>;
   assignTaskIfUnassigned(ownerId: string, taskId: string, agentId: string): Promise<AssignTaskIfUnassignedResult>;

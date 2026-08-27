@@ -97,6 +97,21 @@ export class MemoryStore implements Store {
   async listTasks(ownerId: string, filter?: { projectId?: string; status?: TaskRecord['status'] }): Promise<TaskRecord[]> {
     return this.tasks.filter((t) => t.ownerId === ownerId && (!filter?.projectId || t.projectId === filter.projectId) && (!filter?.status || t.status === filter.status));
   }
+  // Gate 37: Deterministic discovery of schedulable tasks (mirrors SupabaseStore).
+  // Unassigned, queued, within retry cap, owner/project scoped. Read-only.
+  async listSchedulableTasks(ownerId: string, filter?: { projectId?: string; limit?: number }): Promise<TaskRecord[]> {
+    const maxAttempts = 3;
+    const rows = this.tasks
+      .filter((t) => t.ownerId === ownerId)
+      .filter((t) => (filter?.projectId ? t.projectId === filter.projectId : true))
+      .filter((t) => t.agentId === null)
+      .filter((t) => t.status === 'queued')
+      .filter((t) => t.attempts < (t.maxAttempts && t.maxAttempts > 0 ? t.maxAttempts : maxAttempts))
+      .sort((a, b) => (a.createdAt === b.createdAt ? (a.id < b.id ? -1 : 1) : a.createdAt < b.createdAt ? -1 : 1));
+    const limit = filter?.limit;
+    const limited = limit !== undefined ? rows.slice(0, limit) : rows;
+    return limited.map((t) => ({ ...t }));
+  }
   async patchTask(ownerId: string, taskId: string, patch: TaskPatch): Promise<TaskRecord> {
     const t = await this.getTask(ownerId, taskId);
     if (!t) throw new Error('task not found');

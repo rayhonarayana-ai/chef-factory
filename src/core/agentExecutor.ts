@@ -281,7 +281,11 @@ export async function executeAssignedAgentTask(
   }
 
   // 13. Audit: execution result
-  const durationMs = Date.now() - new Date(run.startedAt).getTime();
+  // Duration must be non-negative; run.startedAt uses the DB server clock, which
+  // can be ahead of the client clock (hosted DBs), yielding negative deltas that
+  // violate the task_runs.duration_ms >= 0 constraint.
+  const rawDurationMs = Date.now() - new Date(run.startedAt).getTime();
+  const durationMs = Number.isFinite(rawDurationMs) && rawDurationMs >= 0 ? rawDurationMs : 0;
   await safeAudit(store, {
     actorType: 'agent',
     actorId: agentId,
