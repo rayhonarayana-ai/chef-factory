@@ -53,6 +53,14 @@ export interface ActorContext {
   actorId: string;
   actorType: 'owner' | 'agent';
   agentId?: string | null;
+  /** Gate 40: optional specialist-aware system prompt body injected for agent
+   *  actors. SUITABILITY/prompt only — never grants authority. When absent,
+   *  agent execution falls back to the standard owner-deputy prompt. */
+  agentSystemPrompt?: string | null;
+  /** Gate 40: optional provider-neutral reasoning need from the specialist
+   *  profile's modelNeeds, feeding the existing ModelGateway selection. When
+   *  absent, reasoning is derived from the client intent as before. */
+  agentReasoning?: 'none' | 'low' | 'medium' | 'high' | null;
 }
 
 export interface ExecutionOutcome {

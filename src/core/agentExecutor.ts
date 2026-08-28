@@ -44,6 +44,8 @@ import {
 } from './agentAuthority.js';
 import { parseIntent } from './intent.js';
 import { buildExplanation } from './explanation.js';
+import { getSpecialistProfileByRole } from './specialist/registry.js';
+import { buildSpecialistSystemPrompt } from './specialist/prompt.js';
 
 // ---------- Executable Task Statuses ----------
 
@@ -165,6 +167,14 @@ export async function executeAssignedAgentTask(
     return finalResult('agent_inactive', null, agent, null, null, `Agent lifecycle status "${agent.status}" does not permit execution`, evidence);
   }
 
+  // 2b. Resolve specialist profile (suitability/prompt metadata only — NEVER a
+  // grant of authority). Profiles are looked up by the agent's canonical role.
+  // A missing profile is fine: agent falls back to the generic guardrail prompt.
+  const specialistProfile = getSpecialistProfileByRole(agent.role ?? '');
+  if (specialistProfile) {
+    evidence.push(`specialist.slug=${specialistProfile.slug}`);
+  }
+
   // 3. Load Task
   const task = await store.getTask(ownerId, taskId);
   if (!task) {
@@ -243,6 +253,11 @@ export async function executeAssignedAgentTask(
     actorId: agentId,
     actorType: 'agent',
     agentId,
+    // Gate 40: inject the specialist-aware system prompt + provider-neutral
+    // reasoning need when a profile matches. SUITABILITY/prompt only.
+    // NEVER grants authority; NEVER references a model provider.
+    agentSystemPrompt: buildSpecialistSystemPrompt(agentId, ownerId, task.id, specialistProfile),
+    agentReasoning: specialistProfile?.modelNeeds.reasoning ?? null,
   };
 
   // 9. Build Synthetic Intent

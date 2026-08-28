@@ -132,7 +132,10 @@ export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRu
 
     // Execute-class: try ModelGateway first, then RuntimeGateway.
     const models = await opts.store.listModels(ctx.ownerId);
-    const neededReasoning = computeNeededReasoning(intent);
+    // Gate 40: agent actors may declare a provider-neutral reasoning need via
+    // their specialist profile's modelNeeds. Prefer it when present; otherwise
+    // derive from the client intent.
+    const neededReasoning = ctx.agentReasoning ?? computeNeededReasoning(intent);
     const selection = opts.modelGateway.select(models, {
       requirement: intent.resource ?? 'general',
       neededReasoning,
@@ -755,6 +758,12 @@ async function runInformational(store: Store, ownerId: string, intent: ParsedInt
 }
 
 function systemPrompt(ctx: ActorContext): string {
+  // Gate 40: agent actors may carry a specialist-aware system prompt (suitability
+  // only — never a grant of authority). Use it verbatim when present; otherwise
+  // fall back to the standard owner-deputy prompt.
+  if (ctx.actorType === 'agent' && ctx.agentSystemPrompt) {
+    return ctx.agentSystemPrompt;
+  }
   return [
     `You are CHEF, the owner's personal executive deputy.`,
     `Acting for owner ${ctx.ownerId}.`,
