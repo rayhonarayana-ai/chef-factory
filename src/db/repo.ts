@@ -19,6 +19,7 @@ import type {
   ProjectRecord,
   RecallItem,
   RuntimeInfo,
+  TaskDependencyRecord,
   TaskRecord,
   TaskRunRecord,
 } from '../core/types.js';
@@ -54,6 +55,36 @@ export class SupabaseStore implements Store {
   private async q<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
     const res = await this.pool.query(sql, params);
     return res.rows.map((r) => toCamel(r) as T);
+  }
+
+  // Gate 38 — Serialize dependency-edge mutations for a project through one
+  // transaction-scoped advisory lock (app key 74738 + project hash). Must match
+  // the key used by the DB cycle-guard trigger so that assignment/claim rechecks,
+  // which run here under the same lock, are consistent with concurrent edge
+  // insertions (a writer cannot slip a new edge past this recheck).
+  private async lockDependencyAdvisory(client: import('pg').PoolClient, projectId: string): Promise<void> {
+    await client.query(
+      `SELECT pg_advisory_xact_lock(74738, hashtext('cf_td:' || ($1::text)))`,
+      [projectId],
+    );
+  }
+
+  // Gate 38 — True iff the task still has at least one unmet prerequisite. Must be
+  // called inside the same transaction/locking boundary as the assignment/claim.
+  private async hasUnmetPrerequisite(client: import('pg').PoolClient, taskId: string): Promise<boolean> {
+    const res = await client.query<{ one: number }>(
+      `SELECT 1 AS one
+       WHERE EXISTS (
+         SELECT 1 FROM public.task_dependencies d
+         WHERE d.dependent_task_id = $1
+           AND NOT EXISTS (
+             SELECT 1 FROM public.tasks pr
+             WHERE pr.id = d.prerequisite_task_id AND pr.status = 'completed'
+           )
+       )`,
+      [taskId],
+    );
+    return res.rows.length > 0;
   }
 
   // ---------- projects / passports ----------
@@ -189,6 +220,18 @@ export class SupabaseStore implements Store {
       'agent_id is null',
       `status = 'queued'`,
       'attempts < coalesce(max_attempts, 3)',
+      // Gate 38: readiness — a queued unassigned task is schedulable only when
+      // ALL prerequisites are 'completed' (DEPENDENCY_SATISFIED_BY = COMPLETED_ONLY).
+      // Indexed NOT EXISTS: candidate set is sourced from tasks_schedulable_discovery_idx
+      // then gated by task_dependencies_dependent_idx.
+      `NOT EXISTS (
+        SELECT 1 FROM public.task_dependencies d
+        WHERE d.dependent_task_id = tasks.id
+          AND NOT EXISTS (
+            SELECT 1 FROM public.tasks pr
+            WHERE pr.id = d.prerequisite_task_id AND pr.status = 'completed'
+          )
+      )`,
     ];
     const params: unknown[] = [ownerId];
     if (filter?.projectId) {
@@ -202,6 +245,141 @@ export class SupabaseStore implements Store {
     }
     const res = await this.q<TaskRecord>(sql, params);
     return res.map((r) => ({ ...r }));
+  }
+
+  // ---------- Gate 38: Task dependency / DAG edges ----------
+  // Canonical direction: prerequisite_task_id -> dependent_task_id.
+  // Mutation is owner-scoped and serialized by the DB cycle-guard trigger.
+  async addTaskDependency(ownerId: string, input: {
+    prerequisiteTaskId: string;
+    dependentTaskId: string;
+    createdBy?: string | null;
+  }): Promise<import('../core/ports.js').AddTaskDependencyResult> {
+    const { prerequisiteTaskId, dependentTaskId, createdBy } = input;
+    // Sequential owner-scoped lookups. These are kept sequential (not Promise.all)
+    // because the live Store may be backed by a single shared connection, and two
+    // queries fired concurrently on one client can yield incorrect/empty results.
+    if (prerequisiteTaskId === dependentTaskId) return { ok: false, outcome: 'self_dependency', edge: null };
+    const dep = await this.getTask(ownerId, dependentTaskId);
+    if (!dep) return { ok: false, outcome: 'dependent_not_found', edge: null };
+    const prereq = await this.getTask(ownerId, prerequisiteTaskId);
+    if (!prereq) return { ok: false, outcome: 'prerequisite_not_found', edge: null };
+    // Same owner is guaranteed by owner-scoped lookups above; same project is
+    // required and also structurally enforced by the composite FK.
+    if (prereq.projectId !== dep.projectId) return { ok: false, outcome: 'cross_scope', edge: null };
+    // Gate 38 §7 mutation policy: never retroactively invalidate an in-flight or
+    // finalized dependent. Adding a prerequisite to a running/completed/cancelled
+    // task is denied.
+    if (dep.status === 'running' || dep.status === 'completed' || dep.status === 'cancelled') {
+      return { ok: false, outcome: 'dependent_not_editable', edge: null };
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      let rows: { rows: Record<string, unknown>[] };
+      try {
+        rows = await client.query(
+          `INSERT INTO public.task_dependencies
+             (owner_id, project_id, prerequisite_task_id, dependent_task_id, created_by)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (prerequisite_task_id, dependent_task_id) DO NOTHING
+           RETURNING id, owner_id, project_id, prerequisite_task_id, dependent_task_id, created_by, created_at`,
+          [ownerId, dep.projectId, prerequisiteTaskId, dependentTaskId, createdBy ?? null],
+        );
+      } catch (e) {
+        const msg = String((e as Error)?.message ?? e);
+        await client.query('ROLLBACK');
+        if (msg.includes('TASK_DEPENDENCY_CYCLE')) return { ok: false, outcome: 'cycle_detected', edge: null };
+        if (msg.includes('TASK_DEPENDENCY_SELF')) return { ok: false, outcome: 'self_dependency', edge: null };
+        if (msg.includes('foreign key')) return { ok: false, outcome: 'cross_scope', edge: null };
+        throw e;
+      }
+      if (rows.rows.length === 0) {
+        await client.query('COMMIT');
+        await this.auditDependencyMutation({
+          actorType: 'owner', actorId: ownerId, action: 'task.dependency.add',
+          projectId: dep.projectId, taskId: dependentTaskId, edgeId: null,
+          outcome: 'already_exists', prerequisiteTaskId,
+        });
+        return { ok: false, outcome: 'already_exists', edge: null };
+      }
+      await client.query('COMMIT');
+      const edge = toCamel(rows.rows[0]!) as unknown as import('../core/types.js').TaskDependencyRecord;
+      await this.auditDependencyMutation({
+        actorType: 'owner', actorId: ownerId, action: 'task.dependency.add',
+        projectId: dep.projectId, taskId: dependentTaskId, edgeId: edge.id,
+        outcome: 'added', prerequisiteTaskId,
+      });
+      return { ok: true, outcome: 'added', edge };
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  async removeTaskDependency(ownerId: string, input: {
+    prerequisiteTaskId: string;
+    dependentTaskId: string;
+  }): Promise<import('../core/ports.js').RemoveTaskDependencyResult> {
+    const rows = await this.q<{ id: string; projectId: string }>(
+      `DELETE FROM public.task_dependencies
+       WHERE owner_id = $1 AND prerequisite_task_id = $2 AND dependent_task_id = $3
+       RETURNING id, project_id`,
+      [ownerId, input.prerequisiteTaskId, input.dependentTaskId],
+    );
+    if (rows.length === 0) return { ok: false, outcome: 'edge_not_found' };
+    const edge = rows[0]!;
+    await this.auditDependencyMutation({
+      actorType: 'owner', actorId: ownerId, action: 'task.dependency.remove',
+      projectId: edge.projectId, taskId: input.dependentTaskId, edgeId: edge.id,
+      outcome: 'removed', prerequisiteTaskId: input.prerequisiteTaskId,
+    });
+    return { ok: true, outcome: 'removed' };
+  }
+
+  async listTaskDependencies(ownerId: string, filter?: {
+    projectId?: string;
+    prerequisiteTaskId?: string;
+    dependentTaskId?: string;
+  }): Promise<import('../core/ports.js').ListTaskDependenciesResult> {
+    const conds = ['owner_id = $1'];
+    const params: unknown[] = [ownerId];
+    if (filter?.projectId) { params.push(filter.projectId); conds.push(`project_id = $${params.length}`); }
+    if (filter?.prerequisiteTaskId) { params.push(filter.prerequisiteTaskId); conds.push(`prerequisite_task_id = $${params.length}`); }
+    if (filter?.dependentTaskId) { params.push(filter.dependentTaskId); conds.push(`dependent_task_id = $${params.length}`); }
+    const rows = await this.q<import('../core/types.js').TaskDependencyRecord>(
+      `SELECT * FROM public.task_dependencies WHERE ${conds.join(' AND ')} ORDER BY created_at ASC`,
+      params,
+    );
+    return { edges: rows };
+  }
+
+  private async auditDependencyMutation(input: {
+    actorType: import('../core/types.js').AuditEvent['actorType'];
+    actorId: string;
+    action: string;
+    projectId: string | null;
+    taskId: string | null;
+    edgeId: string | null;
+    outcome: string;
+    prerequisiteTaskId: string;
+  }): Promise<void> {
+    await this.recordAudit({
+      actorType: input.actorType,
+      actorId: input.actorId,
+      action: input.action,
+      projectId: input.projectId,
+      environmentId: null,
+      resourceType: 'task_dependencies',
+      resourceId: input.edgeId,
+      authorizationResult: null,
+      correlationId: null,
+      taskId: input.taskId,
+      metadata: { outcome: input.outcome, prerequisiteTaskId: input.prerequisiteTaskId },
+    });
   }
 
   async patchTask(ownerId: string, taskId: string, patch: import('../core/ports.js').TaskPatch): Promise<TaskRecord> {
@@ -312,8 +490,8 @@ export class SupabaseStore implements Store {
       await client.query('BEGIN');
 
       // 1. Lock and read the task
-      const taskRows = await client.query<{ id: string; agent_id: string | null }>(
-        `SELECT id, agent_id FROM public.tasks WHERE id = $1 AND owner_id = $2 FOR UPDATE`,
+      const taskRows = await client.query<{ id: string; agent_id: string | null; project_id: string }>(
+        `SELECT id, agent_id, project_id FROM public.tasks WHERE id = $1 AND owner_id = $2 FOR UPDATE`,
         [taskId, ownerId],
       );
       if (taskRows.rows.length === 0) {
@@ -321,11 +499,23 @@ export class SupabaseStore implements Store {
         return { ok: false, outcome: 'task_not_found', previousAgentId: null, nextAgentId: agentId };
       }
       const previousAgentId = taskRows.rows[0]!.agent_id;
+      const taskProjectId = taskRows.rows[0]!.project_id;
 
       // 2. Atomic guard: if already assigned, NEVER overwrite
       if (previousAgentId !== null) {
         await client.query('ROLLBACK');
         return { ok: false, outcome: 'already_assigned', previousAgentId, nextAgentId: agentId };
+      }
+
+      // Gate 38 — Readiness recheck inside the same locking boundary as the
+      // assignment. Serialize against concurrent dependency mutations via the
+      // project-scoped advisory lock (the same lock the edge trigger uses), then
+      // verify ALL prerequisites are 'completed'. Fail closed on unmet dependency
+      // so a stale discovery result can never yield an assignment.
+      await this.lockDependencyAdvisory(client, taskProjectId);
+      if (await this.hasUnmetPrerequisite(client, taskId)) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'not_ready', previousAgentId, nextAgentId: agentId };
       }
 
       // 3. Lock and validate agent
@@ -387,9 +577,9 @@ export class SupabaseStore implements Store {
 
       // 1. Lock and read the task
       const taskRows = await client.query<{
-        id: string; agent_id: string | null; status: string; owner_id: string;
+        id: string; agent_id: string | null; status: string; owner_id: string; project_id: string;
       }>(
-        `SELECT id, agent_id, status, owner_id FROM public.tasks WHERE id = $1 AND owner_id = $2 FOR UPDATE`,
+        `SELECT id, agent_id, status, owner_id, project_id FROM public.tasks WHERE id = $1 AND owner_id = $2 FOR UPDATE`,
         [taskId, ownerId],
       );
       if (taskRows.rows.length === 0) {
@@ -419,6 +609,17 @@ export class SupabaseStore implements Store {
         const full = await this.getTask(ownerId, taskId);
         await client.query('ROLLBACK');
         return { ok: false, outcome: 'not_queued', task: full };
+      }
+
+      // Gate 38 — Readiness recheck inside the claim transaction. Serialize with
+      // dependency mutations via the project advisory lock, then fail closed if an
+      // unmet prerequisite exists. A stale discovery result can never reach
+      // execution: DISCOVERY_READY_BUT_CLAIM_NOT_READY => EXECUTION_DENIED.
+      await this.lockDependencyAdvisory(client, row.project_id);
+      if (await this.hasUnmetPrerequisite(client, taskId)) {
+        await client.query('ROLLBACK');
+        const full = await this.getTask(ownerId, taskId);
+        return { ok: false, outcome: 'not_ready', task: full };
       }
 
       // 4. Atomic claim: queued → running (WHERE guards against race)

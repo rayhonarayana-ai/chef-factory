@@ -174,6 +174,19 @@ export interface TaskRecord {
   updatedAt: string;
 }
 
+// ---------- Task dependencies (Gate 38) ----------
+// Relational DAG edge: prerequisite_task_id -> dependent_task_id.
+// A dependent task is READY only when ALL of its prerequisites are 'completed'.
+export interface TaskDependencyRecord {
+  id: string;
+  ownerId: string;
+  projectId: string;
+  prerequisiteTaskId: string;
+  dependentTaskId: string;
+  createdBy: string | null;
+  createdAt: string;
+}
+
 export interface TaskRunRecord {
   id: string;
   taskId: string;

@@ -6,7 +6,7 @@ import type {
   AgentRecord, AgentDefinition, AgentPatch,
   ApprovalRecord, AuditEvent, AutonomyDecision, CostEvent, DailyStatus, DecisionRecord,
   JsonObject, LessonInput, ModelInfo, PassportRecord, ProjectRecord, RecallItem,
-  RuntimeInfo, TaskRecord, TaskRunRecord,
+  RuntimeInfo, TaskDependencyRecord, TaskRecord, TaskRunRecord,
 } from '../core/types.js';
 import type { ConversationRecord, ConversationMessage } from '../core/conversation.js';
 import { emptyPassport } from '../core/passport.js';
@@ -24,6 +24,7 @@ export class MemoryStore implements Store {
   passports: PassportRecord[] = [];
   tasks: TaskRecord[] = [];
   taskRuns: TaskRunRecord[] = [];
+  edges: TaskDependencyRecord[] = [];
   approvals: ApprovalRecord[] = [];
   audit: AuditEvent[] = [];
   costs: CostEvent[] = [];
@@ -107,11 +108,101 @@ export class MemoryStore implements Store {
       .filter((t) => t.agentId === null)
       .filter((t) => t.status === 'queued')
       .filter((t) => t.attempts < (t.maxAttempts && t.maxAttempts > 0 ? t.maxAttempts : maxAttempts))
+      // Gate 38: readiness — only tasks with ALL prerequisites 'completed' are schedulable.
+      .filter((t) => this.isDependencyReady(t))
       .sort((a, b) => (a.createdAt === b.createdAt ? (a.id < b.id ? -1 : 1) : a.createdAt < b.createdAt ? -1 : 1));
     const limit = filter?.limit;
     const limited = limit !== undefined ? rows.slice(0, limit) : rows;
     return limited.map((t) => ({ ...t }));
   }
+
+  // ---------- Gate 38: Task dependency / DAG edges (MemoryStore parity) ----------
+  private isDependencyReady(t: TaskRecord): boolean {
+    return !this.hasUnmetPrerequisite(t.id);
+  }
+
+  private hasUnmetPrerequisite(taskId: string): boolean {
+    for (const edge of this.edges) {
+      if (edge.dependentTaskId !== taskId) continue;
+      const prereq = this.tasks.find((x) => x.id === edge.prerequisiteTaskId);
+      if (!prereq || prereq.status !== 'completed') return true;
+    }
+    return false;
+  }
+
+  // Mirror of the DB cycle-guard semantics: inserting P -> D forms a cycle iff D
+  // can already reach P following the prerequisite->dependent (forward) direction.
+  private wouldCreateCycle(prerequisiteTaskId: string, dependentTaskId: string): boolean {
+    const visited = new Set<string>();
+    const stack = [dependentTaskId];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      if (cur === prerequisiteTaskId) return true;
+      if (visited.has(cur)) continue;
+      visited.add(cur);
+      for (const e of this.edges) {
+        if (e.prerequisiteTaskId === cur) stack.push(e.dependentTaskId);
+      }
+    }
+    return false;
+  }
+
+  async addTaskDependency(ownerId: string, input: {
+    prerequisiteTaskId: string;
+    dependentTaskId: string;
+    createdBy?: string | null;
+  }): Promise<import('../core/ports.js').AddTaskDependencyResult> {
+    const { prerequisiteTaskId, dependentTaskId, createdBy } = input;
+    const prereq = this.tasks.find((x) => x.ownerId === ownerId && x.id === prerequisiteTaskId) ?? null;
+    const dep = this.tasks.find((x) => x.ownerId === ownerId && x.id === dependentTaskId) ?? null;
+    if (!dep) return { ok: false, outcome: 'dependent_not_found', edge: null };
+    if (!prereq) return { ok: false, outcome: 'prerequisite_not_found', edge: null };
+    if (prerequisiteTaskId === dependentTaskId) return { ok: false, outcome: 'self_dependency', edge: null };
+    // Same owner guaranteed by owner-scoped lookups; same project required (FK parity).
+    if (prereq.projectId !== dep.projectId) return { ok: false, outcome: 'cross_scope', edge: null };
+    if (dep.status === 'running' || dep.status === 'completed' || dep.status === 'cancelled') {
+      return { ok: false, outcome: 'dependent_not_editable', edge: null };
+    }
+    const existing = this.edges.find((e) => e.prerequisiteTaskId === prerequisiteTaskId && e.dependentTaskId === dependentTaskId);
+    if (existing) {
+      await this.recordAudit({ actorType: 'owner', actorId: ownerId, action: 'task.dependency.add', projectId: dep.projectId, environmentId: null, resourceType: 'task_dependencies', resourceId: existing.id, authorizationResult: null, correlationId: null, taskId: dependentTaskId, metadata: { outcome: 'already_exists', prerequisiteTaskId } });
+      return { ok: false, outcome: 'already_exists', edge: existing };
+    }
+    if (this.wouldCreateCycle(prerequisiteTaskId, dependentTaskId)) {
+      return { ok: false, outcome: 'cycle_detected', edge: null };
+    }
+    const edge: TaskDependencyRecord = { id: uuid(), ownerId, projectId: dep.projectId, prerequisiteTaskId, dependentTaskId, createdBy: createdBy ?? null, createdAt: now() };
+    this.edges.push(edge);
+    await this.recordAudit({ actorType: 'owner', actorId: ownerId, action: 'task.dependency.add', projectId: dep.projectId, environmentId: null, resourceType: 'task_dependencies', resourceId: edge.id, authorizationResult: null, correlationId: null, taskId: dependentTaskId, metadata: { outcome: 'added', prerequisiteTaskId } });
+    return { ok: true, outcome: 'added', edge };
+  }
+
+  async removeTaskDependency(ownerId: string, input: {
+    prerequisiteTaskId: string;
+    dependentTaskId: string;
+  }): Promise<import('../core/ports.js').RemoveTaskDependencyResult> {
+    const idx = this.edges.findIndex((e) => e.ownerId === ownerId && e.prerequisiteTaskId === input.prerequisiteTaskId && e.dependentTaskId === input.dependentTaskId);
+    if (idx < 0) return { ok: false, outcome: 'edge_not_found' };
+    const edge = this.edges[idx]!;
+    this.edges.splice(idx, 1);
+    await this.recordAudit({ actorType: 'owner', actorId: ownerId, action: 'task.dependency.remove', projectId: edge.projectId, environmentId: null, resourceType: 'task_dependencies', resourceId: edge.id, authorizationResult: null, correlationId: null, taskId: input.dependentTaskId, metadata: { outcome: 'removed', prerequisiteTaskId: input.prerequisiteTaskId } });
+    return { ok: true, outcome: 'removed' };
+  }
+
+  async listTaskDependencies(ownerId: string, filter?: {
+    projectId?: string;
+    prerequisiteTaskId?: string;
+    dependentTaskId?: string;
+  }): Promise<import('../core/ports.js').ListTaskDependenciesResult> {
+    const edges = this.edges.filter(
+      (e) => e.ownerId === ownerId
+        && (!filter?.projectId || e.projectId === filter.projectId)
+        && (!filter?.prerequisiteTaskId || e.prerequisiteTaskId === filter.prerequisiteTaskId)
+        && (!filter?.dependentTaskId || e.dependentTaskId === filter.dependentTaskId),
+    );
+    return { edges: edges.map((e) => ({ ...e })) };
+  }
+
   async patchTask(ownerId: string, taskId: string, patch: TaskPatch): Promise<TaskRecord> {
     const t = await this.getTask(ownerId, taskId);
     if (!t) throw new Error('task not found');
@@ -144,6 +235,8 @@ export class MemoryStore implements Store {
     if (!t) return { ok: false, outcome: 'task_not_found', previousAgentId: null, nextAgentId: agentId };
     const previousAgentId = t.agentId;
     if (previousAgentId !== null) return { ok: false, outcome: 'already_assigned', previousAgentId, nextAgentId: agentId };
+    // Gate 38: readiness recheck — never assign a task with an unmet prerequisite.
+    if (!this.isDependencyReady(t)) return { ok: false, outcome: 'not_ready', previousAgentId, nextAgentId: agentId };
     const agent = this.agents.find((a) => a.ownerId === ownerId && a.id === agentId);
     if (!agent) return { ok: false, outcome: 'agent_not_found', previousAgentId, nextAgentId: agentId };
     if (agent.status !== 'active') return { ok: false, outcome: 'agent_not_eligible', previousAgentId, nextAgentId: agentId };
@@ -168,6 +261,8 @@ export class MemoryStore implements Store {
     if (t.agentId !== agentId) return { ok: false, outcome: 'wrong_agent', task: null };
     if (t.status === 'running') return { ok: false, outcome: 'already_running', task: { ...t } };
     if (t.status !== 'queued') return { ok: false, outcome: 'not_queued', task: { ...t } };
+    // Gate 38: readiness recheck — deny execution claim if an unmet prerequisite exists.
+    if (!this.isDependencyReady(t)) return { ok: false, outcome: 'not_ready', task: { ...t } };
     // Simulate atomic claim
     t.status = 'running';
     t.startedAt = now();

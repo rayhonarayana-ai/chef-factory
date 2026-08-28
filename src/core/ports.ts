@@ -20,6 +20,7 @@ import type {
   ProjectRecord,
   RecallItem,
   RuntimeInfo,
+  TaskDependencyRecord,
   TaskRecord,
   TaskRunRecord,
 } from '../core/types.js';
@@ -105,7 +106,8 @@ export type AssignTaskIfUnassignedOutcome =
   | 'task_not_found'
   | 'agent_not_found'
   | 'agent_not_eligible'
-  | 'agent_at_capacity';
+  | 'agent_at_capacity'
+  | 'not_ready';
 
 export interface AssignTaskIfUnassignedResult {
   ok: boolean;
@@ -121,12 +123,42 @@ export type ClaimTaskOutcome =
   | 'not_assigned'
   | 'wrong_agent'
   | 'not_queued'
-  | 'already_running';
+  | 'already_running'
+  | 'not_ready';
 
 export interface ClaimTaskResult {
   ok: boolean;
   outcome: ClaimTaskOutcome;
   task: TaskRecord | null;
+}
+
+// ————— Gate 38 — Task dependency / DAG edge results —————
+export type AddTaskDependencyOutcome =
+  | 'added'
+  | 'already_exists'
+  | 'self_dependency'
+  | 'prerequisite_not_found'
+  | 'dependent_not_found'
+  | 'dependent_not_editable'
+  | 'cycle_detected'
+  | 'cross_scope'
+  | 'unsupported_status';
+
+export interface AddTaskDependencyResult {
+  ok: boolean;
+  outcome: AddTaskDependencyOutcome;
+  edge: TaskDependencyRecord | null;
+}
+
+export type RemoveTaskDependencyOutcome = 'removed' | 'not_found' | 'edge_not_found';
+
+export interface RemoveTaskDependencyResult {
+  ok: boolean;
+  outcome: RemoveTaskDependencyOutcome;
+}
+
+export interface ListTaskDependenciesResult {
+  edges: TaskDependencyRecord[];
 }
 
 export interface Store {
@@ -171,6 +203,29 @@ export interface Store {
   // Gate 37: deterministic discovery of unassigned schedulable tasks.
   // DISCOVERY ONLY — never assigns, claims, mutates, or grants authority.
   listSchedulableTasks(ownerId: string, filter?: { projectId?: string; limit?: number }): Promise<TaskRecord[]>;
+
+  // ————— Gate 38 — Task dependency / DAG edges —————
+  // Canonical direction: prerequisite_task_id -> dependent_task_id.
+  // A dependent task is READY only when ALL prerequisites are 'completed'.
+  // Mutation is OWNER_ONLY (RLS owner-scoped); the DB-enforced composite FK
+  // makes cross-owner / cross-project edges structurally impossible; a
+  // project-scoped advisory lock + recursive-CTE trigger make cycles
+  // impossible even under concurrent distributed writers.
+  addTaskDependency(ownerId: string, input: {
+    prerequisiteTaskId: string;
+    dependentTaskId: string;
+    createdBy?: string | null;
+  }): Promise<AddTaskDependencyResult>;
+  removeTaskDependency(ownerId: string, input: {
+    prerequisiteTaskId: string;
+    dependentTaskId: string;
+  }): Promise<RemoveTaskDependencyResult>;
+  listTaskDependencies(ownerId: string, filter?: {
+    projectId?: string;
+    prerequisiteTaskId?: string;
+    dependentTaskId?: string;
+  }): Promise<ListTaskDependenciesResult>;
+
   patchTask(ownerId: string, taskId: string, patch: TaskPatch): Promise<TaskRecord>;
   assignTask(ownerId: string, taskId: string, agentId: string | null): Promise<AssignTaskResult>;
   assignTaskIfUnassigned(ownerId: string, taskId: string, agentId: string): Promise<AssignTaskIfUnassignedResult>;
