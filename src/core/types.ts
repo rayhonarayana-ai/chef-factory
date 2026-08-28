@@ -167,11 +167,130 @@ export interface TaskRecord {
   attempts: number;
   maxAttempts: number;
   correlationId: string | null;
+  missionId: string | null;
+  missionTaskKey: string | null;
   createdBy: string | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
   updatedAt: string;
+}
+
+// ---------- Mission / plan (Gate 39) ----------
+// A mission is a durable objective with a validated, deterministic task plan that
+// is bound to a canonical SHA-256 hash at approval time. The engine REQUESTs
+// approval and NEVER approves; materialization/activation are all-or-nothing.
+export const MISSION_STATUSES = [
+  'draft',
+  'pending_approval',
+  'approved',
+  'materialized',
+  'active',
+  'completed',
+  'failed',
+  'cancelled',
+] as const;
+export type MissionStatus = (typeof MISSION_STATUSES)[number];
+
+export const MISSION_TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'] as const;
+
+export interface MissionInput {
+  ownerId: string;
+  projectId: string;
+  objective: string;
+  budgetLimit?: number | null;
+  createdBy?: string | null;
+}
+
+// A single proposed task within a mission plan. NEVER carries an agentId,
+// a permission grant, an authority/autonomy grant, or any tool/execution
+// capability — the mission engine plans only; placement is external.
+export interface TaskProposal {
+  key: string; // stable mission_task_key (unique within the mission)
+  title: string;
+  description?: string | null;
+  priority?: TaskRecord['priority'];
+  riskLevel?: RiskLevel;
+  requiredCapabilities?: string[];
+  preferredRole?: string | null;
+  inputs?: JsonObject;
+  maxAttempts?: number;
+  successCriteria?: string[];
+}
+
+export interface DependencyProposal {
+  prerequisiteKey: string; // task key
+  dependentKey: string; // task key
+}
+
+// The immutable plan attached to a mission once approved (plan_hash binds it).
+export interface MissionPlan {
+  objective: string;
+  tasks: TaskProposal[];
+  dependencies: DependencyProposal[];
+  estimatedBudget?: number | null;
+}
+
+// Bound input used by the deterministic validator / canonical hashing.
+export interface MissionPlanCanonical {
+  objective: string;
+  tasks: Array<{
+    key: string;
+    title: string;
+    description?: string | null;
+    priority?: TaskRecord['priority'];
+    riskLevel?: RiskLevel;
+    requiredCapabilities?: string[];
+    preferredRole?: string | null;
+    inputs?: JsonObject;
+    maxAttempts?: number;
+    successCriteria?: string[];
+  }>;
+  dependencies: Array<{ prerequisiteKey: string; dependentKey: string }>;
+  estimatedBudget?: number | null;
+}
+
+export interface MissionRecord {
+  id: string;
+  ownerId: string;
+  projectId: string;
+  objective: string;
+  status: MissionStatus;
+  plan: JsonObject;
+  planHash: string | null;
+  budgetLimit: number | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt: string | null;
+  materializedAt: string | null;
+  activatedAt: string | null;
+  completedAt: string | null;
+  failedAt: string | null;
+  cancelledAt: string | null;
+}
+
+// Result of the deterministic plan validator.
+export interface MissionValidationResult {
+  ok: boolean;
+  errors: string[];
+}
+
+// Result of the atomic materialization materializer.
+export interface MissionMaterializeResult {
+  ok: boolean;
+  outcome: string;
+  mission: MissionRecord | null;
+  taskCount: number;
+  edgeCount: number;
+}
+
+// Result of the atomic activation.
+export interface MissionActivateResult {
+  ok: boolean;
+  outcome: string;
+  mission: MissionRecord | null;
+  queuedTaskCount: number;
 }
 
 // ---------- Task dependencies (Gate 38) ----------
@@ -221,6 +340,7 @@ export interface ApprovalRecord {
   decidedBy: string | null;
   expiresAt: string | null;
   decidedAt: string | null;
+  metadata: JsonObject;
   createdAt: string;
 }
 

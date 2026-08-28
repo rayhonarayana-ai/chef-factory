@@ -15,6 +15,11 @@ import type {
   JsonObject,
   LessonInput,
   ModelInfo,
+  MissionActivateResult,
+  MissionInput,
+  MissionMaterializeResult,
+  MissionPlanCanonical,
+  MissionRecord,
   PassportRecord,
   ProjectRecord,
   RecallItem,
@@ -25,6 +30,7 @@ import type {
 } from '../core/types.js';
 import type { AgentStats, AgentWorkload, BudgetReport, Store } from '../core/ports.js';
 import { emptyPassport } from '../core/passport.js';
+import { hashMissionPlan } from '../core/mission/missionEngine.js';
 import { getPool } from './pool.js';
 import { Monitor } from '../core/monitoring.js';
 import { toSecurityEventRecord } from '../core/security/events.js';
@@ -171,15 +177,16 @@ export class SupabaseStore implements Store {
       `insert into public.tasks (
          owner_id, project_id, title, description, agent_id, priority, risk_level,
          authority_level, autonomy, approval_required, required_capabilities, preferred_role,
-         status, inputs, max_attempts, correlation_id, created_by
-       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) returning *`,
+         status, inputs, max_attempts, correlation_id, mission_id, mission_task_key, created_by
+       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) returning *`,
       [
         ownerId, data.projectId, data.title, data.description ?? null, data.agentId ?? null,
         data.priority ?? 'medium', data.riskLevel ?? 'low', data.authorityLevel ?? null,
         data.autonomy ?? null, data.approvalRequired ?? false,
         JSON.stringify(data.requiredCapabilities ?? []), data.preferredRole ?? null,
         data.status ?? 'created',
-        JSON.stringify(data.inputs ?? {}), data.maxAttempts ?? 3, data.correlationId ?? null, data.createdBy ?? null,
+        JSON.stringify(data.inputs ?? {}), data.maxAttempts ?? 3, data.correlationId ?? null,
+        data.missionId ?? null, data.missionTaskKey ?? null, data.createdBy ?? null,
       ],
     );
     return rows[0]!;
@@ -355,6 +362,369 @@ export class SupabaseStore implements Store {
       params,
     );
     return { edges: rows };
+  }
+
+  // ---------- Gate 39: Missions (durable objective + validated plan) ----------
+
+  private mapMissionRow(row: Record<string, unknown>): MissionRecord {
+    const r = toCamel(row) as Record<string, unknown>;
+    return {
+      id: r['id'] as string,
+      ownerId: r['ownerId'] as string,
+      projectId: r['projectId'] as string,
+      objective: r['objective'] as string,
+      status: r['status'] as MissionRecord['status'],
+      plan: (r['plan'] ?? {}) as import('../core/types.js').JsonObject,
+      planHash: (r['planHash'] as string) ?? null,
+      budgetLimit: r['budgetLimit'] != null ? Number(r['budgetLimit']) : null,
+      createdBy: (r['createdBy'] as string) ?? null,
+      createdAt: r['createdAt'] as string,
+      updatedAt: r['updatedAt'] as string,
+      approvedAt: (r['approvedAt'] as string) ?? null,
+      materializedAt: (r['materializedAt'] as string) ?? null,
+      activatedAt: (r['activatedAt'] as string) ?? null,
+      completedAt: (r['completedAt'] as string) ?? null,
+      failedAt: (r['failedAt'] as string) ?? null,
+      cancelledAt: (r['cancelledAt'] as string) ?? null,
+    };
+  }
+
+  async createMission(ownerId: string, input: MissionInput): Promise<MissionRecord> {
+    const project = await this.getProject(ownerId, input.projectId);
+    if (!project) throw new Error(`project ${input.projectId} not found for owner`);
+    const rows = await this.q<Record<string, unknown>>(
+      `insert into public.missions (owner_id, project_id, objective, budget_limit, created_by, status)
+       values ($1,$2,$3,$4,$5,'draft') returning *`,
+      [ownerId, input.projectId, input.objective, input.budgetLimit ?? null, input.createdBy ?? null],
+    );
+    return this.mapMissionRow(rows[0]!);
+  }
+
+  async getMission(ownerId: string, missionId: string): Promise<MissionRecord | null> {
+    const rows = await this.q<Record<string, unknown>>(
+      `select * from public.missions where owner_id = $1 and id = $2 limit 1`,
+      [ownerId, missionId],
+    );
+    return rows[0] ? this.mapMissionRow(rows[0]) : null;
+  }
+
+  async listMissions(ownerId: string, filter?: { projectId?: string; status?: MissionRecord['status'] }): Promise<MissionRecord[]> {
+    const conds = ['owner_id = $1'];
+    const params: unknown[] = [ownerId];
+    if (filter?.projectId) { params.push(filter.projectId); conds.push(`project_id = $${params.length}`); }
+    if (filter?.status) { params.push(filter.status); conds.push(`status = $${params.length}`); }
+    const rows = await this.q<Record<string, unknown>>(
+      `select * from public.missions where ${conds.join(' and ')} order by created_at asc`,
+      params,
+    );
+    return rows.map((r) => this.mapMissionRow(r));
+  }
+
+  async saveMissionPlan(ownerId: string, missionId: string, plan: MissionPlanCanonical, planHash: string): Promise<MissionRecord | null> {
+    const rows = await this.q<Record<string, unknown>>(
+      `update public.missions
+       set plan = $3, plan_hash = $4, status = 'draft', updated_at = now()
+       where owner_id = $1 and id = $2 and status in ('draft','pending_approval')
+         and (plan_hash is null or plan_hash = $4)
+       returning *`,
+      [ownerId, missionId, plan, planHash],
+    );
+    return rows[0] ? this.mapMissionRow(rows[0]) : null;
+  }
+
+  async setMissionPendingApproval(ownerId: string, missionId: string): Promise<MissionRecord | null> {
+    const rows = await this.q<Record<string, unknown>>(
+      `update public.missions set status = 'pending_approval', updated_at = now()
+       where owner_id = $1 and id = $2 and status = 'draft' and plan_hash is not null
+       returning *`,
+      [ownerId, missionId],
+    );
+    return rows[0] ? this.mapMissionRow(rows[0]) : null;
+  }
+
+  async markMissionApproved(ownerId: string, missionId: string): Promise<MissionRecord | null> {
+    const rows = await this.q<Record<string, unknown>>(
+      `update public.missions set status = 'approved', approved_at = now(), updated_at = now()
+       where owner_id = $1 and id = $2 and status = 'pending_approval'
+       returning *`,
+      [ownerId, missionId],
+    );
+    return rows[0] ? this.mapMissionRow(rows[0]) : null;
+  }
+
+  async listMissionTasks(ownerId: string, missionId: string): Promise<TaskRecord[]> {
+    return this.q<TaskRecord>(
+      `select * from public.tasks where owner_id = $1 and mission_id = $2 order by created_at asc`,
+      [ownerId, missionId],
+    );
+  }
+
+  async updateMissionStatus(ownerId: string, missionId: string, to: MissionRecord['status']): Promise<MissionRecord | null> {
+    const colMap: Record<string, string> = {
+      completed: 'completed_at',
+      failed: 'failed_at',
+      cancelled: 'cancelled_at',
+      active: 'activated_at',
+      materialized: 'materialized_at',
+      approved: 'approved_at',
+    };
+    const tsCol = colMap[to];
+    const setSql = tsCol
+      ? `status = $3, ${tsCol} = now(), updated_at = now()`
+      : `status = $3, updated_at = now()`;
+    const rows = await this.q<Record<string, unknown>>(
+      `update public.missions set ${setSql}
+       where owner_id = $1 and id = $2 and status <> $3 returning *`,
+      [ownerId, missionId, to],
+    );
+    return rows[0] ? this.mapMissionRow(rows[0]) : null;
+  }
+
+  async materializeMissionPlanAtomic(ownerId: string, missionId: string, plan: MissionPlanCanonical): Promise<MissionMaterializeResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Advisory xact lock scoped to the mission (defense in depth; serializes
+      // concurrent materializers of the same mission). App key 74739.
+      const mHash = (await client.query<{ h: number }>(
+        `SELECT hashtext('cf_mis:' || COALESCE(($1)::text, '')) AS h`,
+        [missionId],
+      )).rows[0]!.h;
+      await client.query(`SELECT pg_advisory_xact_lock(74739, $1)`, [mHash]);
+
+      // 1. Lock and read the mission.
+      const mRows = await client.query<Record<string, unknown>>(
+        `SELECT * FROM public.missions WHERE id = $1 AND owner_id = $2 FOR UPDATE`,
+        [missionId, ownerId],
+      );
+      if (mRows.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'mission_not_found', mission: null, taskCount: 0, edgeCount: 0 };
+      }
+      const mission = this.mapMissionRow(mRows.rows[0]!);
+
+      // 2. Verify lifecycle: only approved may be materialized (idempotent-safe on repeat).
+      if (mission.status === 'materialized' || mission.status === 'active') {
+        // Already materialized — idempotent return; do not duplicate the graph.
+        await client.query('ROLLBACK');
+        const existing = await this.listMissionTasks(ownerId, missionId);
+        return { ok: true, outcome: 'already_materialized', mission: await this.getMission(ownerId, missionId), taskCount: existing.length, edgeCount: 0 };
+      }
+      if (mission.status !== 'approved') {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'mission_not_approved', mission, taskCount: 0, edgeCount: 0 };
+      }
+      if (!mission.planHash) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'plan_not_hashed', mission, taskCount: 0, edgeCount: 0 };
+      }
+
+      // Changed plan after approval => STALE (MISSION_PLAN_APPROVAL_BINDS_TO_HASH = YES).
+      if (hashMissionPlan(plan) !== mission.planHash) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'stale_approval', mission, taskCount: 0, edgeCount: 0 };
+      }
+
+      // 3. Approval must exist, be approved, and match owner/project/mission/plan hash.
+      const appr = await client.query<{ id: string; status: string; plan_hash: string | null }>(
+        `SELECT a.id, a.status,
+                COALESCE((a.metadata->>'planHash'), '') AS plan_hash
+         FROM public.approvals a
+         WHERE a.owner_id = $1 AND a.project_id = $2
+           AND a.action = 'mission.plan.approve' AND a.task_id IS NULL
+           AND COALESCE((a.metadata->>'missionId'), '') = $3
+         ORDER BY a.created_at DESC LIMIT 1`,
+        [ownerId, mission.projectId, missionId],
+      );
+      const latest = appr.rows[0];
+      if (!latest) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'no_approval', mission, taskCount: 0, edgeCount: 0 };
+      }
+      if (latest.status !== 'approved') {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'approval_not_approved', mission, taskCount: 0, edgeCount: 0 };
+      }
+      if (latest.plan_hash !== mission.planHash) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'stale_approval', mission, taskCount: 0, edgeCount: 0 };
+      }
+
+      // 4. Budget check: current project spend + validated estimated mission spend
+      //    must not exceed the allowed budget (server/project/owner hard budget wins).
+      const spend = await this.projectSpendLocked(client, ownerId, mission.projectId);
+      const estimated = typeof plan.estimatedBudget === 'number' ? plan.estimatedBudget : 0;
+      const maxB = await this.projectHardBudgetLocked(client, ownerId, mission.projectId);
+      if (maxB != null && spend + estimated > maxB) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'budget_exceeded', mission, taskCount: 0, edgeCount: 0 };
+      }
+
+      // 5. Insert ALL tasks as status='created', agent_id NULL, mission_task_key set.
+      const taskIdByKey = new Map<string, string>();
+      for (const p of plan.tasks) {
+        const tRows = await client.query<{ id: string }>(
+          `INSERT INTO public.tasks (
+             owner_id, project_id, title, description, priority, risk_level,
+             required_capabilities, preferred_role, status, inputs, max_attempts,
+             mission_id, mission_task_key, created_by, correlation_id
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'created',$9,$10,$11,$12,$13,$14)
+           RETURNING id`,
+          [
+            ownerId, mission.projectId, p.title, p.description ?? null,
+            p.priority ?? 'medium', p.riskLevel ?? 'low',
+            JSON.stringify(p.requiredCapabilities ?? []), p.preferredRole ?? null,
+            JSON.stringify(p.inputs ?? {}), p.maxAttempts ?? 3,
+            mission.id, p.key, ownerId, null,
+          ],
+        );
+        taskIdByKey.set(p.key, tRows.rows[0]!.id);
+      }
+
+      // 6. Insert ALL Gate 38 dependency edges.
+      let edgesInserted = 0;
+      for (const d of plan.dependencies) {
+        const p = taskIdByKey.get(d.prerequisiteKey);
+        const dep = taskIdByKey.get(d.dependentKey);
+        if (!p || !dep) {
+          await client.query('ROLLBACK');
+          return { ok: false, outcome: 'dependency_key_missing', mission, taskCount: 0, edgeCount: 0 };
+        }
+        await client.query(
+          `INSERT INTO public.task_dependencies (owner_id, project_id, prerequisite_task_id, dependent_task_id, created_by)
+           VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+          [ownerId, mission.projectId, p, dep, ownerId],
+        );
+        edgesInserted++;
+      }
+
+      // 7. Mark mission materialized (with materialized_at).
+      await client.query(
+        `UPDATE public.missions SET status = 'materialized', materialized_at = now(), updated_at = now()
+         WHERE id = $1 AND owner_id = $2`,
+        [missionId, ownerId],
+      );
+
+      await client.query('COMMIT');
+
+      // Audit: mission.materialized (no secret-bearing content).
+      await this.recordAudit({
+        actorType: 'owner', actorId: ownerId, action: 'mission.materialized',
+        projectId: mission.projectId, environmentId: null, resourceType: 'missions',
+        resourceId: mission.id, authorizationResult: null, correlationId: null,
+        taskId: null, metadata: { objectSummary: { taskCount: plan.tasks.length, edgeCount: plan.dependencies.length } },
+      });
+
+      const updated = await this.getMission(ownerId, missionId);
+      return { ok: true, outcome: 'materialized', mission: updated, taskCount: plan.tasks.length, edgeCount: edgesInserted };
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  async activateMissionAtomic(ownerId: string, missionId: string): Promise<MissionActivateResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const mHash = (await client.query<{ h: number }>(
+        `SELECT hashtext('cf_mis:' || COALESCE(($1)::text, '')) AS h`,
+        [missionId],
+      )).rows[0]!.h;
+      await client.query(`SELECT pg_advisory_xact_lock(74739, $1)`, [mHash]);
+
+      const mRows = await client.query<Record<string, unknown>>(
+        `SELECT * FROM public.missions WHERE id = $1 AND owner_id = $2 FOR UPDATE`,
+        [missionId, ownerId],
+      );
+      if (mRows.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'mission_not_found', mission: null, queuedTaskCount: 0 };
+      }
+      const mission = this.mapMissionRow(mRows.rows[0]!);
+
+      if (mission.status === 'active') {
+        await client.query('ROLLBACK');
+        const existing = await this.listMissionTasks(ownerId, missionId);
+        return { ok: true, outcome: 'already_active', mission: await this.getMission(ownerId, missionId), queuedTaskCount: existing.filter((t) => t.status === 'queued').length };
+      }
+      if (mission.status !== 'materialized') {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'mission_not_materialized', mission, queuedTaskCount: 0 };
+      }
+
+      // Transition ALL mission tasks created → queued. Conditional UPDATE guards the
+      // invariant that MISSION_ACTIVE never coexists with any task still 'created'.
+      const upd = await client.query<{ id: string }>(
+        `UPDATE public.tasks SET status = 'queued', updated_at = now()
+         WHERE owner_id = $1 AND mission_id = $2 AND status = 'created'
+         RETURNING id`,
+        [ownerId, missionId],
+      );
+      // Verify NO mission task was left in 'created' (ALL or NONE).
+      const left = await client.query<{ n: number }>(
+        `SELECT count(*) AS n FROM public.tasks
+         WHERE owner_id = $1 AND mission_id = $2 AND status = 'created'`,
+        [ownerId, missionId],
+      );
+      if (Number(left.rows[0]!.n) > 0) {
+        await client.query('ROLLBACK');
+        return { ok: false, outcome: 'partial_activation', mission, queuedTaskCount: 0 };
+      }
+
+      await client.query(
+        `UPDATE public.missions SET status = 'active', activated_at = now(), updated_at = now()
+         WHERE id = $1 AND owner_id = $2`,
+        [missionId, ownerId],
+      );
+
+      await client.query('COMMIT');
+
+      await this.recordAudit({
+        actorType: 'owner', actorId: ownerId, action: 'mission.activated',
+        projectId: mission.projectId, environmentId: null, resourceType: 'missions',
+        resourceId: mission.id, authorizationResult: null, correlationId: null,
+        taskId: null, metadata: { objectSummary: { queuedTaskCount: upd.rowCount ?? 0 } },
+      });
+
+      const updated = await this.getMission(ownerId, missionId);
+      return { ok: true, outcome: 'activated', mission: updated, queuedTaskCount: upd.rowCount ?? 0 };
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Current project spend, read inside the materialization transaction.
+  private async projectSpendLocked(client: import('pg').PoolClient, ownerId: string, projectId: string): Promise<number> {
+    const rows = await client.query<{ sum: string | null }>(
+      `SELECT sum(amount) AS sum FROM public.cost_events WHERE owner_id = $1 AND project_id = $2`,
+      [ownerId, projectId],
+    );
+    return Number(rows.rows[0]?.sum ?? 0);
+  }
+
+  // Server/project hard budget: preference 'budget'[projectId] ?? 'budget'['default'].
+  // This matches getPreferences/projectBudget semantics and is authoritative: the
+  // mission engine can never raise it.
+  private async projectHardBudgetLocked(client: import('pg').PoolClient, ownerId: string, projectId: string): Promise<number | null> {
+    const rows = await client.query<{ key: string; value: unknown; is_active: boolean }>(
+      `SELECT key, value, is_active FROM public.personal_preferences
+       WHERE owner_id = $1 AND category = 'budget' ORDER BY version ASC`,
+      [ownerId],
+    );
+    const active: Record<string, unknown> = {};
+    for (const r of rows.rows) {
+      if (!r.is_active) continue;
+      active[r.key] = r.value;
+    }
+    const budget = active;
+    const maxAmount = budget ? ((budget[projectId] ?? budget['default']) as number | undefined) : undefined;
+    return maxAmount != null ? Number(maxAmount) : null;
   }
 
   private async auditDependencyMutation(input: {
@@ -693,12 +1063,13 @@ export class SupabaseStore implements Store {
     const rows = await this.q<ApprovalRecord>(
       `insert into public.approvals (
          owner_id, project_id, task_id, agent_id, action, description, risk_level,
-         authority_level, requested_by, expires_at
-       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning *`,
+         authority_level, requested_by, expires_at, metadata
+       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning *`,
       [
         ownerId, data.projectId ?? null, data.taskId ?? null, data.agentId ?? null,
         data.action, data.description ?? null, data.riskLevel ?? null,
         data.authorityLevel ?? null, data.requestedBy ?? null, data.expiresAt ?? null,
+        JSON.stringify(data.metadata ?? {}),
       ],
     );
     return rows[0]!;

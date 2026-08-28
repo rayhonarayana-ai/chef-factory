@@ -16,6 +16,12 @@ import type {
   JsonObject,
   LessonInput,
   ModelInfo,
+  MissionActivateResult,
+  MissionInput,
+  MissionMaterializeResult,
+  MissionPlanCanonical,
+  MissionRecord,
+  MissionStatus,
   PassportRecord,
   ProjectRecord,
   RecallItem,
@@ -196,6 +202,8 @@ export interface Store {
     inputs?: JsonObject;
     maxAttempts?: number;
     correlationId?: string | null;
+    missionId?: string | null;
+    missionTaskKey?: string | null;
     createdBy?: string | null;
   }): Promise<TaskRecord>;
   getTask(ownerId: string, taskId: string): Promise<TaskRecord | null>;
@@ -225,6 +233,31 @@ export interface Store {
     prerequisiteTaskId?: string;
     dependentTaskId?: string;
   }): Promise<ListTaskDependenciesResult>;
+
+  // ————— Gate 39 — Mission Engine (durable objective + validated plan) —————
+  // Missions are OWNER_ONLY constructs; the engine REQUESTs approval and never
+  // approves. Plan is bound to a canonical SHA-256 hash at approval time and is
+  // immutable after approval. Materialization and activation are each ONE
+  // transaction that is ALL-OR-NOTHING (never a partial task graph / partial
+  // activation). mission_task_key is the stable client-side task identity and is
+  // UNIQUE per (owner, project, mission).
+  createMission(ownerId: string, input: MissionInput): Promise<MissionRecord>;
+  getMission(ownerId: string, missionId: string): Promise<MissionRecord | null>;
+  listMissions(ownerId: string, filter?: { projectId?: string; status?: MissionStatus }): Promise<MissionRecord[]>;
+  saveMissionPlan(ownerId: string, missionId: string, plan: MissionPlanCanonical, planHash: string): Promise<MissionRecord | null>;
+  setMissionPendingApproval(ownerId: string, missionId: string): Promise<MissionRecord | null>;
+  markMissionApproved(ownerId: string, missionId: string): Promise<MissionRecord | null>;
+  // Atomic materialization (one tx): approved+unbound-hash-verified -> insert ALL
+  // tasks (created, agent_id NULL, mission_task_key set) + ALL dependency edges ->
+  // mission materialized. Partial task graph is impossible (ROLLBACK on any error).
+  materializeMissionPlanAtomic(ownerId: string, missionId: string, plan: MissionPlanCanonical): Promise<MissionMaterializeResult>;
+  // Atomic activation (one tx): materialized -> queue ALL mission tasks (created→queued)
+  // -> mission active. ALL or NONE; never MISSION_ACTIVE with some tasks still 'created'.
+  activateMissionAtomic(ownerId: string, missionId: string): Promise<MissionActivateResult>;
+  listMissionTasks(ownerId: string, missionId: string): Promise<TaskRecord[]>;
+  // Apply a lifecycle transition (e.g. active->completed|failed|cancelled) with the
+  // associated timestamp. Returns null if the transition is illegal (deterministic).
+  updateMissionStatus(ownerId: string, missionId: string, to: MissionStatus): Promise<MissionRecord | null>;
 
   patchTask(ownerId: string, taskId: string, patch: TaskPatch): Promise<TaskRecord>;
   assignTask(ownerId: string, taskId: string, agentId: string | null): Promise<AssignTaskResult>;
@@ -256,6 +289,7 @@ export interface Store {
     authorityLevel?: AutonomyLevel | null;
     requestedBy?: string | null;
     expiresAt?: string | null;
+    metadata?: JsonObject;
   }): Promise<ApprovalRecord>;
   getApproval(ownerId: string, approvalId: string): Promise<ApprovalRecord | null>;
   listApprovals(ownerId: string, filter?: { projectId?: string; taskId?: string; status?: ApprovalRecord['status'] }): Promise<ApprovalRecord[]>;

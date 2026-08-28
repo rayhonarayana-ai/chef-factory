@@ -5,8 +5,9 @@ import type { Store, TaskPatch, ApprovalPatch, AgentStats, AgentWorkload, Budget
 import type {
   AgentRecord, AgentDefinition, AgentPatch,
   ApprovalRecord, AuditEvent, AutonomyDecision, CostEvent, DailyStatus, DecisionRecord,
-  JsonObject, LessonInput, ModelInfo, PassportRecord, ProjectRecord, RecallItem,
-  RuntimeInfo, TaskDependencyRecord, TaskRecord, TaskRunRecord,
+  JsonObject, LessonInput, MissionInput, MissionPlanCanonical, MissionRecord, ModelInfo,
+  PassportRecord, ProjectRecord, RecallItem, RuntimeInfo, TaskDependencyRecord, TaskRecord,
+  TaskRunRecord,
 } from '../core/types.js';
 import type { ConversationRecord, ConversationMessage } from '../core/conversation.js';
 import { emptyPassport } from '../core/passport.js';
@@ -15,6 +16,7 @@ import { CRITICAL_ACTIONS } from '../core/security/criticalActions.js';
 import { toSecurityEventRecord } from '../core/security/events.js';
 import { toIncidentRecord, applyIncidentPatch } from '../core/security/incidents.js';
 import { toLockdownRecord, canReleaseLockdown } from '../core/security/lockdown.js';
+import { missionCanTransition, hashMissionPlan } from '../core/mission/missionEngine.js';
 
 const uuid = (): string => crypto.randomUUID();
 const now = (): string => new Date().toISOString();
@@ -40,6 +42,7 @@ export class MemoryStore implements Store {
   securityLockdowns: SecurityLockdownRecord[] = [];
   conversations: ConversationRecord[] = [];
   conversationMessages: ConversationMessage[] = [];
+  missions: MissionRecord[] = [];
 
   // projects / passports
   async getProjectBySlug(ownerId: string, slug: string): Promise<ProjectRecord | null> {
@@ -87,6 +90,7 @@ export class MemoryStore implements Store {
       requiredCapabilities: data.requiredCapabilities ?? [], preferredRole: data.preferredRole ?? null,
       inputs: data.inputs ?? {}, output: null, error: null,
       attempts: 0, maxAttempts: data.maxAttempts ?? 3, correlationId: data.correlationId ?? null,
+      missionId: data.missionId ?? null, missionTaskKey: data.missionTaskKey ?? null,
       createdBy: data.createdBy ?? null, createdAt: now(), startedAt: null, completedAt: null, updatedAt: now(),
     };
     this.tasks.push(t);
@@ -203,6 +207,161 @@ export class MemoryStore implements Store {
     return { edges: edges.map((e) => ({ ...e })) };
   }
 
+  // ---------- Gate 39: Missions (MemoryStore parity) ----------
+  async createMission(ownerId: string, input: MissionInput): Promise<MissionRecord> {
+    const project = await this.getProject(ownerId, input.projectId);
+    if (!project) throw new Error(`project ${input.projectId} not found for owner`);
+    const m: MissionRecord = {
+      id: uuid(), ownerId, projectId: input.projectId, objective: input.objective,
+      status: 'draft', plan: {}, planHash: null, budgetLimit: input.budgetLimit ?? null,
+      createdBy: input.createdBy ?? null, createdAt: now(), updatedAt: now(),
+      approvedAt: null, materializedAt: null, activatedAt: null, completedAt: null,
+      failedAt: null, cancelledAt: null,
+    };
+    this.missions.push(m);
+    return m;
+  }
+  async getMission(ownerId: string, missionId: string): Promise<MissionRecord | null> {
+    return this.missions.find((m) => m.ownerId === ownerId && m.id === missionId) ?? null;
+  }
+  async listMissions(ownerId: string, filter?: { projectId?: string; status?: MissionRecord['status'] }): Promise<MissionRecord[]> {
+    return this.missions
+      .filter((m) => m.ownerId === ownerId
+        && (!filter?.projectId || m.projectId === filter.projectId)
+        && (!filter?.status || m.status === filter.status))
+      .map((m) => ({ ...m }));
+  }
+  async saveMissionPlan(ownerId: string, missionId: string, plan: MissionPlanCanonical, planHash: string): Promise<MissionRecord | null> {
+    const m = this.missions.find((x) => x.ownerId === ownerId && x.id === missionId);
+    if (!m) return null;
+    if (!['draft', 'pending_approval'].includes(m.status)) return null;
+    if (m.planHash && m.planHash !== planHash) return null;
+    m.plan = plan as unknown as JsonObject;
+    m.planHash = planHash;
+    m.status = 'draft';
+    m.updatedAt = now();
+    return { ...m };
+  }
+  async setMissionPendingApproval(ownerId: string, missionId: string): Promise<MissionRecord | null> {
+    const m = this.missions.find((x) => x.ownerId === ownerId && x.id === missionId);
+    if (!m) return null;
+    if (m.status !== 'draft' || !m.planHash) return null;
+    m.status = 'pending_approval';
+    m.updatedAt = now();
+    return { ...m };
+  }
+  async markMissionApproved(ownerId: string, missionId: string): Promise<MissionRecord | null> {
+    const m = this.missions.find((x) => x.ownerId === ownerId && x.id === missionId);
+    if (!m) return null;
+    if (m.status !== 'pending_approval') return null;
+    m.status = 'approved';
+    m.approvedAt = now();
+    m.updatedAt = now();
+    return { ...m };
+  }
+  async listMissionTasks(ownerId: string, missionId: string): Promise<TaskRecord[]> {
+    return this.tasks.filter((t) => t.ownerId === ownerId && t.missionId === missionId).map((t) => ({ ...t }));
+  }
+
+  async updateMissionStatus(ownerId: string, missionId: string, to: MissionRecord['status']): Promise<MissionRecord | null> {
+    const m = this.missions.find((x) => x.ownerId === ownerId && x.id === missionId);
+    if (!m) return null;
+    if (m.status === to) return null;
+    if (!missionCanTransition(m.status, to)) return null;
+    const tsField: Record<string, keyof MissionRecord> = {
+      completed: 'completedAt', failed: 'failedAt', cancelled: 'cancelledAt',
+      active: 'activatedAt', materialized: 'materializedAt', approved: 'approvedAt',
+    };
+    m.status = to;
+    m.updatedAt = now();
+    const field = tsField[to];
+    if (field) (m as unknown as Record<string, unknown>)[field] = now();
+    return { ...m };
+  }
+
+  // Project hard budget from preferences ('budget'[projectId] ?? 'budget'['default']).
+  private async missionHardBudget(ownerId: string, projectId: string): Promise<number | null> {
+    const active: Record<string, unknown> = {};
+    for (const p of this.prefs) {
+      if (!p.isActive || p.category !== 'budget') continue;
+      active[p.key] = p.value;
+    }
+    const maxAmount = active[projectId] ?? active['default'];
+    return maxAmount != null ? Number(maxAmount) : null;
+  }
+  async materializeMissionPlanAtomic(ownerId: string, missionId: string, plan: MissionPlanCanonical): Promise<import('../core/types.js').MissionMaterializeResult> {
+    const m = this.missions.find((x) => x.ownerId === ownerId && x.id === missionId);
+    if (!m) return { ok: false, outcome: 'mission_not_found', mission: null, taskCount: 0, edgeCount: 0 };
+    if (m.status === 'materialized' || m.status === 'active') {
+      const existing = await this.listMissionTasks(ownerId, missionId);
+      return { ok: true, outcome: 'already_materialized', mission: { ...m }, taskCount: existing.length, edgeCount: 0 };
+    }
+    if (m.status !== 'approved') return { ok: false, outcome: 'mission_not_approved', mission: { ...m }, taskCount: 0, edgeCount: 0 };
+    if (!m.planHash) return { ok: false, outcome: 'plan_not_hashed', mission: { ...m }, taskCount: 0, edgeCount: 0 };
+    // Changed plan after approval => STALE (MISSION_PLAN_APPROVAL_BINDS_TO_HASH = YES).
+    if (hashMissionPlan(plan) !== m.planHash) return { ok: false, outcome: 'stale_approval', mission: { ...m }, taskCount: 0, edgeCount: 0 };
+    // Approval check: an approved mission.plan.approve approval bound to this
+    // mission + hash must exist (metadata carries { missionId, planHash }).
+    const appr = this.approvals.find(
+      (a) => a.ownerId === ownerId && a.projectId === m.projectId
+        && a.action === 'mission.plan.approve' && a.status === 'approved'
+        && (a.metadata?.['missionId']) === m.id
+        && (a.metadata?.['planHash']) === m.planHash,
+    );
+    if (!appr) return { ok: false, outcome: 'no_approval', mission: { ...m }, taskCount: 0, edgeCount: 0 };
+    // Budget check: project hard budget (preferences 'budget') is authoritative.
+    const spend = await this.totalCost(ownerId, m.projectId);
+    const estimated = typeof plan.estimatedBudget === 'number' ? plan.estimatedBudget : 0;
+    const maxB = await this.missionHardBudget(ownerId, m.projectId);
+    if (maxB != null && spend + estimated > maxB) {
+      return { ok: false, outcome: 'budget_exceeded', mission: { ...m }, taskCount: 0, edgeCount: 0 };
+    }
+    const taskIdByKey = new Map<string, string>();
+    for (const p of plan.tasks) {
+      const t = await this.createTask(ownerId, {
+        projectId: m.projectId, title: p.title, description: p.description ?? undefined,
+        priority: p.priority, riskLevel: p.riskLevel, requiredCapabilities: p.requiredCapabilities,
+        preferredRole: p.preferredRole ?? null, inputs: p.inputs, maxAttempts: p.maxAttempts,
+        status: 'created', missionId: m.id, missionTaskKey: p.key, createdBy: ownerId,
+      });
+      taskIdByKey.set(p.key, t.id);
+    }
+    let edgesInserted = 0;
+    for (const d of plan.dependencies) {
+      const p = taskIdByKey.get(d.prerequisiteKey);
+      const dep = taskIdByKey.get(d.dependentKey);
+      if (!p || !dep) return { ok: false, outcome: 'dependency_key_missing', mission: { ...m }, taskCount: 0, edgeCount: 0 };
+      await this.addTaskDependency(ownerId, { prerequisiteTaskId: p, dependentTaskId: dep, createdBy: ownerId });
+      edgesInserted++;
+    }
+    m.status = 'materialized';
+    m.materializedAt = now();
+    m.updatedAt = now();
+    return { ok: true, outcome: 'materialized', mission: { ...m }, taskCount: plan.tasks.length, edgeCount: edgesInserted };
+  }
+  async activateMissionAtomic(ownerId: string, missionId: string): Promise<import('../core/types.js').MissionActivateResult> {
+    const m = this.missions.find((x) => x.ownerId === ownerId && x.id === missionId);
+    if (!m) return { ok: false, outcome: 'mission_not_found', mission: null, queuedTaskCount: 0 };
+    if (m.status === 'active') {
+      const existing = await this.listMissionTasks(ownerId, missionId);
+      return { ok: true, outcome: 'already_active', mission: { ...m }, queuedTaskCount: existing.filter((t) => t.status === 'queued').length };
+    }
+    if (m.status !== 'materialized') return { ok: false, outcome: 'mission_not_materialized', mission: { ...m }, queuedTaskCount: 0 };
+    const missionTasks = this.tasks.filter((t) => t.ownerId === ownerId && t.missionId === missionId);
+    for (const t of missionTasks) {
+      if (t.status === 'created') {
+        t.status = 'queued';
+        t.updatedAt = now();
+      }
+    }
+    const stillCreated = missionTasks.filter((t) => t.status === 'created').length;
+    if (stillCreated > 0) return { ok: false, outcome: 'partial_activation', mission: { ...m }, queuedTaskCount: 0 };
+    m.status = 'active';
+    m.activatedAt = now();
+    m.updatedAt = now();
+    return { ok: true, outcome: 'activated', mission: { ...m }, queuedTaskCount: missionTasks.filter((t) => t.status === 'queued').length };
+  }
+
   async patchTask(ownerId: string, taskId: string, patch: TaskPatch): Promise<TaskRecord> {
     const t = await this.getTask(ownerId, taskId);
     if (!t) throw new Error('task not found');
@@ -285,7 +444,7 @@ export class MemoryStore implements Store {
 
   // approvals
   async createApproval(ownerId: string, data: Parameters<Store['createApproval']>[1]): Promise<ApprovalRecord> {
-    const a: ApprovalRecord = { id: uuid(), ownerId, projectId: data.projectId ?? null, taskId: data.taskId ?? null, agentId: data.agentId ?? null, action: data.action, description: data.description ?? null, riskLevel: data.riskLevel ?? null, authorityLevel: data.authorityLevel ?? null, status: 'pending', decision: null, decisionReason: null, requestedBy: data.requestedBy ?? null, decidedBy: null, expiresAt: data.expiresAt ?? null, decidedAt: null, createdAt: now() };
+    const a: ApprovalRecord = { id: uuid(), ownerId, projectId: data.projectId ?? null, taskId: data.taskId ?? null, agentId: data.agentId ?? null, action: data.action, description: data.description ?? null, riskLevel: data.riskLevel ?? null, authorityLevel: data.authorityLevel ?? null, status: 'pending', decision: null, decisionReason: null, requestedBy: data.requestedBy ?? null, decidedBy: null, expiresAt: data.expiresAt ?? null, decidedAt: null, metadata: data.metadata ?? {}, createdAt: now() };
     this.approvals.push(a);
     return a;
   }
