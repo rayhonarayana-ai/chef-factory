@@ -28,7 +28,7 @@ import {
   type Gate45AcceptanceGateway,
   type Gate45AcceptanceResult,
 } from './gate45Acceptance.js';
-import { createVerificationAcceptanceGateway, type RequirementRunner } from '../software/verification/gate45.js';
+import { createVerificationAcceptanceGateway, type RequirementRunner, type Fingerprinter } from '../software/verification/gate45.js';
 import { CostProtector, DEFAULT_COST_PROTECTION } from './security/costProtection.js';
 import { MISSION_BOUNDS } from './mission/missionEngine.js';
 import { validateMissionPlan } from './mission/missionEngine.js';
@@ -50,6 +50,15 @@ function stubRunner(plan: Record<string, VerificationResult>): RequirementRunner
   return async (op: VerificationOperation) => plan[op] ?? failRun(op, 'failed');
 }
 
+/** Injectable trusted fingerprinter (default stable; `after` simulates a workspace
+ *  change detected on the post-hash read). */
+function stubFp(fingerprint = 'f'.repeat(64), after?: string): Fingerprinter {
+  return async () => {
+    const fp = after ?? fingerprint;
+    return { ok: true, value: { algorithm: 'sha256', fingerprint: fp, fileCount: 1, totalBytes: 1 } };
+  };
+}
+
 function stubExecution(): ExecutionRunner {
   return {
     execute: async (_t: TaskRecord, _c: ActorContext): Promise<ExecutionOutcome> => ({ ok: true, output: { claimed: 'byModel' }, cost: 0 }),
@@ -61,8 +70,14 @@ function stubGateway(result: Gate45AcceptanceResult): Gate45AcceptanceGateway {
 }
 
 function decision(cls: Gate45AcceptanceResult['cls']): Gate45AcceptanceResult {
-  return { accepted: cls === 'passed', cls, reason: cls === 'passed' ? null : 'verification_not_passed:test:failed', runs: [] };
+  return { accepted: cls === 'passed', cls, reason: cls === 'passed' ? null : 'verification_not_passed:test:failed', runs: [], workspaceFingerprint: cls === 'passed' ? 'f'.repeat(64) : null };
 }
+
+const stableCompletionGuard = {
+  async withStableWorkspace<T>(_task: TaskRecord, _fingerprint: string, onStable: () => Promise<T>) {
+    return { stable: true as const, value: await onStable() };
+  },
+};
 
 interface Fx {
   store: MemoryStore;
@@ -110,7 +125,7 @@ describe('Gate 45 — deterministic classification', () => {
     expect(classifyVerificationOutcome('dependency_missing')).toBe('nonRepairable');
     expect(classifyVerificationOutcome('tool_not_available')).toBe('nonRepairable');
     expect(classifyVerificationOutcome('invalid_operation')).toBe('nonRepairable');
-    expect(classifyVerificationOutcome('workspace_changed')).toBe('nonRepairable');
+    expect(classifyVerificationOutcome('workspace_changed')).toBe('repairable');
     expect(classifyVerificationOutcome('internal_error')).toBe('nonRepairable');
     expect(classifyVerificationOutcome('execution_denied')).toBe('blocked');
   });
@@ -195,6 +210,7 @@ describe('Gate 45 — Advisor-Only: model success claim is never sufficient', ()
     const r = await executeAssignedAgentTask({
       store: fx.store, execution: stubExecution(), ownerId: fx.ownerId, agentId: ag.id, taskId: t.id,
       verification: stubGateway(decision('passed')),
+      completionWorkspaceGuard: stableCompletionGuard,
     });
     expect(r.ok).toBe(true);
     expect(r.outcome).toBe('completed');
@@ -266,6 +282,7 @@ describe('Gate 45 — concrete gate boundary re-checks', () => {
     return createVerificationAcceptanceGateway({
       store,
       runOp: stubRunner(plan),
+      fingerprint: stubFp(),
       resolveWorkspaceRoot: async () => '/tmp/ws',
       costProtector: new CostProtector(store, DEFAULT_COST_PROTECTION),
     });
@@ -342,7 +359,7 @@ describe('Gate 45 — concrete gate boundary re-checks', () => {
 // =====================================================================
 describe('Gate 45 — concrete gate trust + evidence', () => {
   function gate(store: Store, plan: Record<string, VerificationResult> = {}) {
-    return createVerificationAcceptanceGateway({ store, runOp: stubRunner(plan), resolveWorkspaceRoot: async () => '/tmp/ws' });
+    return createVerificationAcceptanceGateway({ store, runOp: stubRunner(plan), fingerprint: stubFp(), resolveWorkspaceRoot: async () => '/tmp/ws' });
   }
 
   it('19: closed op set is exactly test|typecheck|build (no arbitrary command, install, shell, git)', () => {

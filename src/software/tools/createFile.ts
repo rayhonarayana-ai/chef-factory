@@ -10,7 +10,9 @@ import type { Pool } from 'pg';
 import { getPool } from '../../db/pool.js';
 import { stat } from 'node:fs/promises';
 import { resolveWorkspace, validateRelativePath } from '../types.js';
-import { withFileLockAndDb, exclusiveCreate } from '../../workspace/mutation.js';
+// withRepoAndFileLockAndDb composes the existing withFileLockAndDb under the
+// canonical repo -> file ordering required by Gate46 final acceptance.
+import { withRepoAndFileLockAndDb, exclusiveCreate } from '../../workspace/mutation.js';
 import { scanForSecrets } from '../dlpscan.js';
 import { MAX_FILE_WRITE_SIZE } from '../../workspace/types.js';
 import type { Store } from '../../core/ports.js';
@@ -40,7 +42,7 @@ export async function createFileHandler(input: ToolHandlerInput): Promise<ToolHa
   const ctx = input.context!;
 
   try {
-    const result = await withFileLockAndDb(lockDb, workspace.workspaceRoot, targetPath, async (db) => {
+    const result = await withRepoAndFileLockAndDb(lockDb, workspace.workspaceRoot, targetPath, async (db) => {
       // Step 1: Validate path against workspace and protected policy
       const pathCheck = validateRelativePath(targetPath, workspace);
       if (!pathCheck.ok) {

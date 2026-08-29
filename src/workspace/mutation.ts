@@ -36,8 +36,10 @@ export function repoLockKeys(workspaceRoot: string): [number, number] {
 }
 
 /**
- * Gate 36 V2 — Execute within a repo-level advisory lock.
- * Used by git_prepare_commit and git_commit.
+ * Execute within the workspace-level advisory lock. This is the narrow
+ * coordination primitive shared by Git actions, CHEF source mutations, and Gate46
+ * final verification-to-completion binding. It MUST be acquired before any file
+ * lock (canonical order: repo -> file).
  */
 export async function withRepoLock<T>(
   poolOrDb: Pool | DbQuery,
@@ -154,6 +156,21 @@ export async function withFileLockAndDb<T>(
       await db.query('SELECT pg_advisory_unlock($1, $2)', [key1, key2]);
     }
   }
+}
+
+/**
+ * Run a source mutation under the shared workspace coordination lock followed by
+ * its existing path-specific lock. This preserves concurrent different-file work
+ * except during Gate46's short final acceptance window.
+ */
+export async function withRepoAndFileLockAndDb<T>(
+  poolOrDb: Pool | DbQuery,
+  workspaceRoot: string,
+  relativePath: string,
+  fn: (db: DbQuery) => Promise<T>,
+): Promise<T> {
+  return withRepoLock(poolOrDb, workspaceRoot, async (db) =>
+    withFileLockAndDb(db, workspaceRoot, relativePath, fn));
 }
 
 /**

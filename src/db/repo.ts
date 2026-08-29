@@ -828,16 +828,37 @@ export class SupabaseStore implements Store, WorkforceControlAdminPersistence, M
     );
     return rows[0]!;
   }
+  async completeTaskIfRunning(ownerId: string, taskId: string, patch: import('../core/ports.js').TaskPatch): Promise<TaskRecord | null> {
+    const cols: Record<string, string> = {
+      status: 'status', output: 'output', error: 'error', completedAt: 'completed_at',
+    };
+    const params: unknown[] = [ownerId, taskId];
+    const sets: string[] = [];
+    for (const [k, v] of Object.entries(patch)) {
+      const col = cols[k];
+      if (!col) continue;
+      params.push(v === null ? null : typeof v === 'object' ? JSON.stringify(v) : v);
+      sets.push(`${col} = $${params.length}`);
+    }
+    if (sets.length === 0) throw new Error('empty completion patch');
+    const rows = await this.q<TaskRecord>(
+      `update public.tasks set ${sets.join(', ')} where owner_id = $1 and id = $2 and status = 'running' returning *`,
+      params,
+    );
+    return rows[0] ?? null;
+  }
 
   // ————— Gate 45 — Trusted verification evidence —————
   async recordTaskVerification(ownerId: string, input: Parameters<Store['recordTaskVerification']>[1]): Promise<TaskVerificationRecord> {
     const task = await this.getTask(ownerId, input.taskId);
     if (!task) throw new Error('task not found');
+    if (task.projectId !== input.projectId) throw new Error('task project mismatch');
     const rows = await this.q<TaskVerificationRecord>(
       `insert into public.task_verifications (
-         owner_id, project_id, task_id, run_id, attempt, operation, outcome, exit_code, duration_ms
-       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning *`,
-      [ownerId, input.projectId, input.taskId, input.runId ?? null, input.attempt, input.operation, input.outcome, input.exitCode ?? null, input.durationMs ?? null],
+         owner_id, project_id, task_id, run_id, attempt, operation, outcome, exit_code, duration_ms,
+         verification_session_id, workspace_fingerprint
+       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning *`,
+      [ownerId, input.projectId, input.taskId, input.runId ?? null, input.attempt, input.operation, input.outcome, input.exitCode ?? null, input.durationMs ?? null, input.verificationSessionId ?? null, input.workspaceFingerprint ?? null],
     );
     return rows[0]!;
   }

@@ -277,6 +277,8 @@ export interface Store {
   updateMissionStatus(ownerId: string, missionId: string, to: MissionStatus): Promise<MissionRecord | null>;
 
   patchTask(ownerId: string, taskId: string, patch: TaskPatch): Promise<TaskRecord>;
+  /** Atomically complete only a task still running; protects final completion from cancellation races. */
+  completeTaskIfRunning(ownerId: string, taskId: string, patch: TaskPatch): Promise<TaskRecord | null>;
   assignTask(ownerId: string, taskId: string, agentId: string | null): Promise<AssignTaskResult>;
   assignTaskIfUnassigned(ownerId: string, taskId: string, agentId: string): Promise<AssignTaskIfUnassignedResult>;
   createTaskRun(ownerId: string, data: {
@@ -308,6 +310,10 @@ export interface Store {
     outcome: TaskVerificationRecord['outcome'];
     exitCode?: number | null;
     durationMs?: number | null;
+    /** Gate 46 — trusted verification session id binding this evidence row. */
+    verificationSessionId?: string | null;
+    /** Gate 46 — trusted workspace fingerprint binding this evidence row (AUDIT-ONLY). */
+    workspaceFingerprint?: string | null;
   }): Promise<TaskVerificationRecord>;
   listTaskVerifications(ownerId: string, taskId: string): Promise<TaskVerificationRecord[]>;
 

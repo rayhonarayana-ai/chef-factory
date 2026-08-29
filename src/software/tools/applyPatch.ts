@@ -11,7 +11,9 @@ import { getPool } from '../../db/pool.js';
 import { resolveWorkspace } from '../types.js';
 import { isProtectedPath } from '../../workspace/protected.js';
 import { isPathContained } from '../../workspace/resolver.js';
-import { withFileLockAndDb, contentHash, safeReadFile, atomicReplace } from '../../workspace/mutation.js';
+// withRepoAndFileLockAndDb composes the existing withFileLockAndDb under the
+// canonical repo -> file ordering required by Gate46 final acceptance.
+import { withRepoAndFileLockAndDb, contentHash, safeReadFile, atomicReplace } from '../../workspace/mutation.js';
 import { scanForSecrets } from '../dlpscan.js';
 import { MAX_PATCH_SIZE } from '../../workspace/types.js';
 import type { Store } from '../../core/ports.js';
@@ -40,7 +42,7 @@ export async function applyPatchHandler(input: ToolHandlerInput): Promise<ToolHa
   const { resolve: pathResolve } = await import('node:path');
 
   try {
-    const result = await withFileLockAndDb(lockDb, workspace.workspaceRoot, targetPath, async (db) => {
+    const result = await withRepoAndFileLockAndDb(lockDb, workspace.workspaceRoot, targetPath, async (db) => {
       // Step 2: Re-resolve workspace + target (defense-in-depth under lock)
       const candidate = pathResolve(workspace.workspaceRoot, targetPath);
 

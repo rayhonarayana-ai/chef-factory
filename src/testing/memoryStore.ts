@@ -405,6 +405,11 @@ export class MemoryStore implements Store, WorkforceControlAdminPersistence, Mod
     this.tasks[this.tasks.indexOf(t)] = next;
     return next;
   }
+  async completeTaskIfRunning(ownerId: string, taskId: string, patch: TaskPatch): Promise<TaskRecord | null> {
+    const current = await this.getTask(ownerId, taskId);
+    if (!current || current.status !== 'running') return null;
+    return this.patchTask(ownerId, taskId, patch);
+  }
   async assignTask(ownerId: string, taskId: string, agentId: string | null): Promise<import('../core/ports.js').AssignTaskResult> {
     const t = this.tasks.find((x) => x.ownerId === ownerId && x.id === taskId);
     if (!t) return { ok: false, outcome: 'task_not_found', previousAgentId: null, nextAgentId: agentId };
@@ -478,11 +483,15 @@ export class MemoryStore implements Store, WorkforceControlAdminPersistence, Mod
   async recordTaskVerification(ownerId: string, input: Parameters<Store['recordTaskVerification']>[1]): Promise<TaskVerificationRecord> {
     const task = await this.getTask(ownerId, input.taskId);
     if (!task) throw new Error('task not found');
+    if (task.projectId !== input.projectId) throw new Error('task project mismatch');
     const v: TaskVerificationRecord = {
       id: uuid(), ownerId, projectId: input.projectId, taskId: input.taskId,
       runId: input.runId ?? null, attempt: input.attempt,
       operation: input.operation, outcome: input.outcome,
-      exitCode: input.exitCode ?? null, durationMs: input.durationMs ?? null, observedAt: now(),
+      exitCode: input.exitCode ?? null, durationMs: input.durationMs ?? null,
+      verificationSessionId: input.verificationSessionId ?? null,
+      workspaceFingerprint: input.workspaceFingerprint ?? null,
+      observedAt: now(),
     };
     this.taskVerifications.push(v);
     return v;

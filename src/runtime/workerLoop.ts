@@ -17,12 +17,12 @@
 import type { Store } from '../core/ports.js';
 import type { ExecutionRunner } from '../core/pipeline.js';
 import { runWorkforce, type WorkforceOrchestratorOutcome } from '../core/workforceOrchestrator.js';
-import type { Gate45AcceptanceGateway } from '../core/gate45Acceptance.js';
+import type { Gate45AcceptanceGateway, CompletionWorkspaceGuard } from '../core/gate45Acceptance.js';
 import { isGlobalStopActive } from '../core/security/workforceControl.js';
 import { WORKFORCE_SERVICE_ACTOR, WORKFORCE_SERVICE_ACTOR_TYPE, WORKFORCE_SERVICE_AUDIT_ACTOR_ID } from '../core/workforceService.js';
 import { applyJitter, type WorkforceRuntimeConfig } from './config.js';
 import { reconcileOwnerActiveMissions } from '../core/mission/missionRuntime.js';
-import { createVerificationAcceptanceGateway } from '../software/verification/gate45.js';
+import { createVerificationAcceptanceGateway, createCompletionWorkspaceGuard } from '../software/verification/gate45.js';
 
 type Activity = 'work' | 'idle' | 'error';
 
@@ -44,6 +44,9 @@ export interface WorkforceWorkerDeps {
   /** Gate 45 — optional trusted verification acceptance gateway. When absent, the
    *  worker constructs the default hardened gateway over `store` at construction. */
   verification?: Gate45AcceptanceGateway;
+  /** Gate 46 — optional completion-boundary workspace guard. When absent, the
+   *  worker constructs the default integrity-service guard over `store`. */
+  completionWorkspaceGuard?: CompletionWorkspaceGuard;
 }
 
 export class WorkforceWorker {
@@ -51,6 +54,7 @@ export class WorkforceWorker {
   #execution: ExecutionRunner;
   #config: WorkforceRuntimeConfig;
   #verification: Gate45AcceptanceGateway;
+  #completionWorkspaceGuard: CompletionWorkspaceGuard;
 
   #idleStep = 0;
   #errorFails = 0;
@@ -63,6 +67,7 @@ export class WorkforceWorker {
     this.#execution = deps.execution;
     this.#config = deps.config;
     this.#verification = deps.verification ?? createVerificationAcceptanceGateway({ store: deps.store });
+    this.#completionWorkspaceGuard = deps.completionWorkspaceGuard ?? createCompletionWorkspaceGuard({ store: deps.store });
   }
 
   #audit(action: string, metadata: Record<string, unknown> = {}): Promise<void> {
@@ -170,6 +175,7 @@ export class WorkforceWorker {
           store: this.#store,
           execution: this.#execution,
           verification: this.#verification,
+          completionWorkspaceGuard: this.#completionWorkspaceGuard,
           ownerId,
           actorId: WORKFORCE_SERVICE_ACTOR,
           workforceService: true,

@@ -46,7 +46,7 @@ import { parseIntent } from './intent.js';
 import { buildExplanation } from './explanation.js';
 import { getSpecialistProfileByRole } from './specialist/registry.js';
 import { buildSpecialistSystemPrompt } from './specialist/prompt.js';
-import type { Gate45AcceptanceGateway } from './gate45Acceptance.js';
+import type { Gate45AcceptanceGateway, CompletionWorkspaceGuard } from './gate45Acceptance.js';
 
 // ---------- Executable Task Statuses ----------
 
@@ -145,6 +145,15 @@ export interface ExecuteAssignedAgentTaskInput {
    * declaration of success would be the only authority (DISALLOWED).
    */
   verification?: Gate45AcceptanceGateway;
+  /**
+   * Gate 46 — completion-boundary workspace guard. When provided, it re-validates
+   * that the workspace fingerprint has not changed since the gate accepted, closing
+   * the final post-hash -> completion TOCTOU interval. Returns true when the
+   * workspace is still stable (safe to complete) and false when it changed
+   * (WORKSPACE_CHANGED -> abort, re-verify on the existing bounded retry).
+   * Wired from the composition root with the trusted integrity service.
+   */
+  completionWorkspaceGuard?: CompletionWorkspaceGuard;
 }
 
 /**
@@ -159,7 +168,7 @@ export interface ExecuteAssignedAgentTaskInput {
 export async function executeAssignedAgentTask(
   input: ExecuteAssignedAgentTaskInput,
 ): Promise<AgentExecutionResult> {
-  const { store, execution, ownerId, agentId, taskId, conversationHistory, verification } = input;
+  const { store, execution, ownerId, agentId, taskId, conversationHistory, verification, completionWorkspaceGuard } = input;
   const evidence: string[] = [`agentId=${agentId}`, `ownerId=${ownerId}`, `taskId=${taskId}`];
 
   // 1. Load Agent
@@ -331,6 +340,7 @@ export async function executeAssignedAgentTask(
   let shouldComplete = outcome.ok;
   let notAcceptedReason: string | null = null;
   let acceptanceClass: 'passed' | 'repairable' | 'nonRepairable' | 'blocked' | null = null;
+  let acceptedWorkspaceFingerprint: string | null = null;
 
   const requiresVerification = (claimedTask.requiredVerifications?.length ?? 0) > 0;
 
@@ -346,6 +356,7 @@ export async function executeAssignedAgentTask(
         shouldComplete = decision.accepted;
         acceptanceClass = decision.cls;
         notAcceptedReason = decision.reason;
+        acceptedWorkspaceFingerprint = decision.workspaceFingerprint ?? null;
       } catch (e) {
         shouldComplete = false;
         acceptanceClass = 'blocked';
@@ -354,7 +365,7 @@ export async function executeAssignedAgentTask(
     }
   }
 
-  if (shouldComplete) {
+  const persistCompletion = async (): Promise<AgentExecutionResult> => {
     await store.completeTaskRun(ownerId, run.id, {
       status: 'completed',
       outputSnapshot: (outcome.output ?? null) as Record<string, unknown> | null,
@@ -378,12 +389,13 @@ export async function executeAssignedAgentTask(
         metadata: { trigger: 'agent_executor' },
       });
     }
-    const done = await store.patchTask(ownerId, claimedTask.id, {
+    const done = await store.completeTaskIfRunning(ownerId, claimedTask.id, {
       status: 'completed',
       output: (outcome.output ?? null) as Record<string, unknown> | null,
       error: null,
       completedAt: new Date().toISOString(),
     });
+    if (!done) throw new Error('task_state_changed_at_completion');
     await store.recordDecision(ownerId, {
       projectId: claimedTask.projectId,
       context: `Agent ${agentId} executed task ${claimedTask.id}`,
@@ -406,7 +418,36 @@ export async function executeAssignedAgentTask(
       outcome: 'completed',
     });
     return { ok: true, outcome: 'completed', task: done, agent, authority: authorityResult.authority, autonomy: authorityResult.autonomy, explanation, error: null, evidence };
+  };
+
+  // Gate 46: the trusted completion write must run while the same short workspace
+  // coordination lock is held as CHEF source mutations. A missing fingerprint or
+  // coordinator therefore fails closed rather than treating a timing window as proof.
+  if (shouldComplete && requiresVerification) {
+    if (!acceptedWorkspaceFingerprint || !completionWorkspaceGuard) {
+      shouldComplete = false;
+      acceptanceClass = 'blocked';
+      notAcceptedReason = 'workspace_completion_coordinator_missing';
+    } else {
+      try {
+        const guarded = await completionWorkspaceGuard.withStableWorkspace(
+          claimedTask,
+          acceptedWorkspaceFingerprint,
+          persistCompletion,
+        );
+        if (guarded.stable) return guarded.value;
+        shouldComplete = false;
+        acceptanceClass = 'repairable';
+        notAcceptedReason = 'workspace_changed_at_completion';
+      } catch (e) {
+        shouldComplete = false;
+        acceptanceClass = 'blocked';
+        notAcceptedReason = `workspace_completion_coordinator_threw:${String(e)}`;
+      }
+    }
   }
+
+  if (shouldComplete) return persistCompletion();
 
   // 14b. Verification-required task NOT accepted (or gate missing). The model must
   //      never override this. Classify deterministically and route: repairable →

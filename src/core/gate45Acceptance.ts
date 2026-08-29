@@ -33,11 +33,42 @@ export interface Gate45AcceptanceResult {
   /** Human/machine-readable non-secret reason. */
   reason: string | null;
   runs: Gate45RunOutcome[];
+  /**
+   * Gate 46 — true when FINGERPRINT_BEFORE != FINGERPRINT_AFTER (the workspace
+   * changed during verification). When true, accepted=false and cls='repairable'.
+   * WORKSPACE_CHANGED → REVERIFY_REQUIRED via the existing bounded retry.
+   */
+  workspaceChanged?: boolean;
+  /**
+   * Gate 46 — the trusted workspace fingerprint of the verified (post) state when the
+   * gate accepted. AgentExecutor re-validates this at the completion boundary to
+   * close the final post-hash → completion TOCTOU interval. null when unavailable.
+   */
+  workspaceFingerprint?: string | null;
 }
 
 /** The injected trusted gate. evaluate() must be deterministic and bounded. */
 export interface Gate45AcceptanceGateway {
   evaluate(task: TaskRecord): Promise<Gate45AcceptanceResult>;
+}
+
+/** Result of a final workspace coordination section. */
+export type CompletionWorkspaceGuardResult<T> =
+  | { stable: true; value: T }
+  | { stable: false };
+
+/**
+ * Gate 46 — final workspace coordination section. It acquires the shared workspace
+ * lock, computes the final fingerprint under that lock, and invokes `onStable`
+ * before releasing it. Therefore the task completion write is atomic relative to
+ * every CHEF-controlled source mutation participating in the same lock.
+ */
+export interface CompletionWorkspaceGuard {
+  withStableWorkspace<T>(
+    task: TaskRecord,
+    expectedFingerprint: string,
+    onStable: () => Promise<T>,
+  ): Promise<CompletionWorkspaceGuardResult<T>>;
 }
 
 // ---------- Deterministic classification ----------
@@ -49,15 +80,23 @@ const NON_REPAIRABLE: ReadonlySet<VerificationOutcome> = new Set<VerificationOut
   'dependency_missing', // excluded: DEPENDENCY_INSTALLATION_EXCLUDED, env condition
   'tool_not_available',
   'invalid_operation', // config error, not code repair
-  'workspace_changed', // concurrency guard — post-hoc workspace changed, not model-fixable
   'internal_error', // infrastructure failure
 ]);
 
-/** Repairable verification outcomes — the model may edit and re-verify on a bounded retry. */
+/** Repairable verification outcomes — the model may edit and re-verify on a bounded retry.
+ *
+ * Gate 46: `workspace_changed` moved here from NON_REPAIRABLE. Under Gate 46 the
+ * trusted acceptance gate produces a REAL `workspace_changed` only when the
+ * deterministic fingerprint changed during verification (FINGERPRINT_BEFORE !=
+ * FINGERPRINT_AFTER). That is a REPAIRABLE condition: the model may edit/restore the
+ * workspace and re-verify on the existing bounded cross-attempt TaskEngine retry.
+ * Security/budget/cancel/global-stop/denial remain BLOCKED and are never repairable.
+ */
 const REPAIRABLE: ReadonlySet<VerificationOutcome> = new Set<VerificationOutcome>([
   'failed',
   'timeout',
   'output_limit_exceeded',
+  'workspace_changed',
 ]);
 
 /**

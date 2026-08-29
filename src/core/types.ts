@@ -343,9 +343,9 @@ export interface TaskRunRecord {
 // REQUIRED task. SYSTEM-OBSERVED (trusted infrastructure writes only; agents/models
 // cannot forge it). Deliberately NOT a general observability/evidence platform.
 // It records only the trusted check outcome, NOT raw stdout/stderr and NOT secrets.
-// manifestHash is intentionally not claimed here: the current verification runner
-// returns manifestHash null, so this evidence does NOT assert immutable artifact
-// integrity (see KNOWN_LIMITATIONS / TASK61 workspace binding note).
+// Gate 46: the row now binds the trusted verification session and the workspace
+// fingerprint (verification_session_id + workspace_fingerprint). This is AUDIT-ONLY;
+// historical evidence NEVER authorizes future completion.
 export interface TaskVerificationRecord {
   id: string;
   ownerId: string;
@@ -357,6 +357,10 @@ export interface TaskVerificationRecord {
   outcome: import('../software/verification/types.js').VerificationOutcome;
   exitCode: number | null;
   durationMs: number | null;
+  /** Gate 46 — trusted verification session id (AUDIT-ONLY binding). */
+  verificationSessionId: string | null;
+  /** Gate 46 — trusted workspace fingerprint (AUDIT-ONLY binding). */
+  workspaceFingerprint: string | null;
   observedAt: string;
 }
 
