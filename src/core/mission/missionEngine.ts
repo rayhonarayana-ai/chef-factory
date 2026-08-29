@@ -54,6 +54,12 @@ export const MISSION_LIFECYCLE: Record<MissionStatus, MissionStatus[]> = {
 
 const TERMINAL_STATUSES = new Set<MissionStatus>(['completed', 'failed', 'cancelled']);
 
+// Gate 45 — closed set of allowed verification operations (matches
+// src/software/verification/types.ts). Kept as plain literals here so core stays
+// independent of the verification runtime (no shell, no arbitrary commands).
+const VALID_VERIFICATION_OPERATIONS = new Set<string>(['test', 'typecheck', 'build']);
+const MAX_VERIFICATIONS_PER_TASK = 10;
+
 export function missionCanTransition(from: MissionStatus, to: MissionStatus): boolean {
   return (MISSION_LIFECYCLE[from] ?? []).includes(to);
 }
@@ -92,6 +98,8 @@ export function canonicalizePlan(plan: MissionPlanCanonical): MissionPlanCanonic
       inputs: t.inputs ?? {},
       maxAttempts: t.maxAttempts ?? 3,
       successCriteria: t.successCriteria ?? [],
+      verificationRequired: t.verificationRequired ?? false,
+      requiredVerifications: t.requiredVerifications ?? [],
     })),
     dependencies: (plan.dependencies ?? []).map((d) => ({
       prerequisiteKey: d.prerequisiteKey,
@@ -152,6 +160,18 @@ export function validateMissionPlan(
     }
     const pve = posIntOpt(t.maxAttempts, 3);
     if (pve < 1) errors.push(`task ${t.key ?? '?'} invalid maxAttempts`);
+    // Gate 45 — verification contract bounds. Only the closed op set is allowed;
+    // verificationRequired=true demands at least one op; ops require the flag.
+    if (t.verificationRequired) {
+      const verifs = t.requiredVerifications ?? [];
+      if (verifs.length === 0) errors.push(`task ${t.key ?? '?'} verificationRequired but no requiredVerifications`);
+      if (verifs.length > MAX_VERIFICATIONS_PER_TASK) errors.push(`task ${t.key ?? '?'} too many verifications`);
+      for (const v of verifs) {
+        if (!VALID_VERIFICATION_OPERATIONS.has(v)) errors.push(`task ${t.key ?? '?'} invalid verification operation ${String(v)}`);
+      }
+    } else if ((t.requiredVerifications ?? []).length > 0) {
+      errors.push(`task ${t.key ?? '?'} requiredVerifications present but verificationRequired=false`);
+    }
   }
 
   // DAG: all dependency keys must exist; no self-edge; acyclicity + depth + fan.

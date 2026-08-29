@@ -31,6 +31,7 @@ import type {
   TaskDependencyRecord,
   TaskRecord,
   TaskRunRecord,
+  TaskVerificationRecord,
 } from '../core/types.js';
 
 import type {
@@ -65,6 +66,8 @@ export interface TaskPatch {
   environmentId?: string | null;
   requiredCapabilities?: string[];
   preferredRole?: string | null;
+  verificationRequired?: boolean;
+  requiredVerifications?: import('./types.js').TaskRecord['requiredVerifications'];
 }
 
 export interface ApprovalPatch {
@@ -209,6 +212,8 @@ export interface Store {
     missionId?: string | null;
     missionTaskKey?: string | null;
     createdBy?: string | null;
+    verificationRequired?: boolean;
+    requiredVerifications?: TaskRecord['requiredVerifications'];
   }): Promise<TaskRecord>;
   getTask(ownerId: string, taskId: string): Promise<TaskRecord | null>;
   listTasks(ownerId: string, filter?: { projectId?: string; status?: TaskRecord['status'] }): Promise<TaskRecord[]>;
@@ -289,6 +294,22 @@ export interface Store {
     cost?: number;
     completedAt?: string | null;
   }): Promise<TaskRunRecord>;
+
+  // ————— Gate 45 — Trusted verification evidence —————
+  // SYSTEM-OBSERVED writes performed only by the trusted acceptance gate.
+  // Never invoked by agents/models; not a general evidence/observability platform.
+  // Bounded retention expectation: minimal outcomes only (no stdout/stderr, no secrets).
+  recordTaskVerification(ownerId: string, input: {
+    projectId: string;
+    taskId: string;
+    runId?: string | null;
+    attempt: number;
+    operation: TaskVerificationRecord['operation'];
+    outcome: TaskVerificationRecord['outcome'];
+    exitCode?: number | null;
+    durationMs?: number | null;
+  }): Promise<TaskVerificationRecord>;
+  listTaskVerifications(ownerId: string, taskId: string): Promise<TaskVerificationRecord[]>;
 
   // approvals
   createApproval(ownerId: string, data: {

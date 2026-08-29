@@ -703,15 +703,21 @@ describe.skipIf(!enabled)('Gate 6 — Live Verification (query_data against real
     const tableNames = res.rows.map((r: any) => r.table_name);
 
     // Known tables from Gate 1-5 migrations
+    // Authoritative schema inventory for the live public schema. Recognizes the
+    // exact authorized tables added across gates (Gate 38 task_dependencies,
+    // Gate 39 missions, Gate 41 workforce_control, Gate 43 model_health_observations,
+    // Gate 45 task_verifications). Any table NOT listed here still fails.
     const knownTables = [
       'agent_permissions', 'agents', 'approvals', 'audit_events',
       'autonomy_records', 'conversation_messages', 'conversations',
       'cost_events', 'critical_actions', 'decision_journal',
-      'memory_lessons', 'models', 'owners', 'personal_preferences',
+      'memory_lessons', 'missions', 'model_health_observations', 'models',
+      'owners', 'personal_preferences',
       'project_environments', 'project_passports', 'projects', 'runtimes',
       'security_events', 'security_incidents', 'security_lockdowns',
-      'security_policies', 'security_rate_limits', 'task_runs', 'tasks',
-      'tools',
+      'security_policies', 'security_rate_limits', 'task_dependencies',
+      'task_runs', 'task_verifications', 'tasks',
+      'tools', 'workforce_control',
     ];
 
     // No new tables should exist
@@ -733,7 +739,7 @@ describe.skipIf(!enabled)('Gate 6 — Live Verification (query_data against real
     const cols = res.rows.map((r: any) => r.column_name);
 
     // Known tasks columns
-    const knownCols = ['id', 'owner_id', 'project_id', 'environment_id', 'parent_task_id', 'agent_id', 'title', 'description', 'status', 'priority', 'risk_level', 'authority_level', 'autonomy', 'approval_required', 'inputs', 'output', 'error', 'attempts', 'max_attempts', 'correlation_id', 'created_by', 'created_at', 'started_at', 'completed_at', 'updated_at', 'required_capabilities', 'preferred_role'];
+    const knownCols = ['id', 'owner_id', 'project_id', 'environment_id', 'parent_task_id', 'agent_id', 'title', 'description', 'status', 'priority', 'risk_level', 'authority_level', 'autonomy', 'approval_required', 'inputs', 'output', 'error', 'attempts', 'max_attempts', 'correlation_id', 'created_by', 'created_at', 'started_at', 'completed_at', 'updated_at', 'required_capabilities', 'preferred_role', 'mission_id', 'mission_task_key', 'verification_required', 'required_verifications'];
 
     for (const c of cols) {
       expect(knownCols).toContain(c);

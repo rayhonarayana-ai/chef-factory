@@ -1,0 +1,241 @@
+// CHEF FACTORY — Gate 45 — Trusted Software Task Completion acceptance gate
+// (concrete implementation).
+//
+// This is the server-side deterministic gate that decides whether a
+// verification-required task may transition to COMPLETED. It lives in the software
+// verification module because it composes the hardened verification runner and
+// workspace resolution. It is injected into AgentExecutor through the composition
+// root as a `Gate45AcceptanceGateway`.
+//
+// Conservative design:
+//   - Runs EACH required operation through the SAME hardened runner/profile
+//     architecture as the agent-facing run_verification tool (shell=false, trusted
+//     executable/args/cwd, env allowlist, timeout, bounded/redacted output).
+//   - Ignores the model's textual claim entirely (MODEL_DECLARES_SUCCESS = ADVISORY).
+//   - Records minimal trusted evidence per operation (task_verifications).
+//   - Re-checks durable controls at the acceptance/repair boundary:
+//       GLOBAL_WORKFORCE_STOP, OWNER_LOCKDOWN, TASK_CURRENT_STATUS (cancelled never
+//       overwritten to completed), MISSION_CURRENT_STATUS, BUDGET eligibility.
+//   - Classifies failures deterministically; the model can never reclassify
+//     security/budget/cancel/global-stop as repairable.
+//   - Bounded: no unbounded recursion — one evaluation per invocation; retries are
+//     delegated back to the existing cross-attempt TaskEngine retry path.
+//
+// LIVE_MODEL_PROVIDER_CALLS = 0 (Gate45 itself never calls a model provider).
+
+import type { Store } from '../../core/ports.js';
+import type { TaskRecord } from '../../core/types.js';
+import type {
+  Gate45AcceptanceGateway,
+  Gate45AcceptanceResult,
+  Gate45RunOutcome,
+} from '../../core/gate45Acceptance.js';
+import { combineClassification } from '../../core/gate45Acceptance.js';
+import { CostProtector, DEFAULT_COST_PROTECTION } from '../../core/security/costProtection.js';
+import { isGlobalStopActive } from '../../core/security/workforceControl.js';
+import { buildVerificationProfiles, validateProfile } from './registry.js';
+import { runVerification } from './runner.js';
+import type { VerificationOperation, VerificationResult } from './types.js';
+import { resolveWorkspaceRoot as resolvePassportWorkspaceRoot } from '../../workspace/resolver.js';
+
+/** A single required-operation runner. Injectable for tests; default uses the real runner. */
+export type RequirementRunner = (
+  operation: VerificationOperation,
+  workspaceRoot: string,
+) => Promise<VerificationResult>;
+
+/** Prepare the trusted runner for a workspace. */
+export function makeRequirementRunner(workspaceRoot: string, filter?: string): RequirementRunner {
+  const profiles = buildVerificationProfiles(workspaceRoot);
+  return async (operation, wsRoot) => {
+    const profile = profiles.get(operation);
+    if (!profile) {
+      return {
+        ok: false, outcome: 'invalid_operation', operation, exitCode: null, timedOut: false,
+        durationMs: 0, stdout: '', stderr: '', truncated: false, manifestHash: null,
+      };
+    }
+    const validation = validateProfile(profile);
+    if (!validation.ok) {
+      return {
+        ok: false, outcome: 'dependency_missing', operation, exitCode: null, timedOut: false,
+        durationMs: 0, stdout: '', stderr: '', truncated: false, manifestHash: null,
+      };
+    }
+    return runVerification({ profile, workspaceRoot: wsRoot, filter });
+  };
+}
+
+export interface VerificationAcceptanceDeps {
+  store: Store;
+  /** Resolve the workspace root from a task. Default uses the passport. May be overridden in tests. */
+  resolveWorkspaceRoot?: (task: TaskRecord) => Promise<string | null>;
+  /** Optional injectable runner (tests use a stub; production uses the real hardened runner). */
+  runOp?: RequirementRunner;
+  /** Owner/project hard budget. Reuses the existing CostProtector (no second accounting system). */
+  costProtector?: CostProtector;
+}
+
+const workspaceNotResolved = (operation: VerificationOperation): VerificationResult => ({
+  ok: false, outcome: 'internal_error', operation, exitCode: null, timedOut: false,
+  durationMs: 0, stdout: '', stderr: '', truncated: false, manifestHash: null,
+});
+
+/**
+ * Resolve the workspace root from the task's project passport (the same trusted
+ * source the run_verification tool uses). Returns null when unresolvable.
+ */
+export async function defaultResolveWorkspaceRoot(store: Store, task: TaskRecord): Promise<string | null> {
+  if (!task.projectId) return null;
+  const passport = await store.getPassport(task.ownerId, task.projectId);
+  if (!passport) return null;
+  const raw = resolvePassportWorkspaceRoot((passport.repository as Record<string, unknown> | undefined) ?? null);
+  if (!raw) return null;
+  const { realpathSync } = await import('node:fs');
+  try {
+    return realpathSync(raw);
+  } catch {
+    return null;
+  }
+}
+
+export function createVerificationAcceptanceGateway(deps: VerificationAcceptanceDeps): Gate45AcceptanceGateway {
+  const {
+    store,
+    runOp,
+    costProtector = new CostProtector(store, DEFAULT_COST_PROTECTION),
+    resolveWorkspaceRoot = (task) => defaultResolveWorkspaceRoot(store, task),
+  } = deps;
+
+  return {
+    async evaluate(task: TaskRecord): Promise<Gate45AcceptanceResult> {
+      const required = task.requiredVerifications ?? [];
+      const runs: Gate45RunOutcome[] = [];
+
+      // 0. Not required → trivially passed (AgentExecutor still only calls the gate for
+      //    verification-required tasks, but be safe).
+      if (!task.verificationRequired || required.length === 0) {
+        return { accepted: true, cls: 'passed', reason: null, runs };
+      }
+
+      // 1. Boundary re-check: CANCELLED_TASK_CAN_BE_OVERWRITTEN_COMPLETED = NO.
+      try {
+        const current = await store.getTask(task.ownerId, task.id);
+        if (!current) {
+          return { accepted: false, cls: 'blocked', reason: 'task_not_found', runs };
+        }
+        if (current.status !== 'running') {
+          return {
+            accepted: false, cls: 'blocked',
+            reason: `task_state_changed:${current.status}`,
+            runs,
+          };
+        }
+      } catch (e) {
+        return { accepted: false, cls: 'blocked', reason: `task_read_failed:${String(e)}`, runs };
+      }
+
+      // 2. Boundary: GLOBAL_WORKFORCE_STOP prevents a new repair/acceptance boundary.
+      try {
+        const control = await store.getWorkforceControl();
+        if (isGlobalStopActive(control)) {
+          return { accepted: false, cls: 'blocked', reason: 'global_stop', runs };
+        }
+      } catch (e) {
+        return { accepted: false, cls: 'blocked', reason: `global_control_read_failed:${String(e)}`, runs };
+      }
+
+      // 3. Boundary: OWNER_LOCKDOWN prevents a new repair/acceptance boundary.
+      try {
+        const lockdown = await store.activeLockdown(task.ownerId);
+        if (lockdown) {
+          return { accepted: false, cls: 'blocked', reason: 'owner_lockdown', runs };
+        }
+      } catch (e) {
+        return { accepted: false, cls: 'blocked', reason: `lockdown_read_failed:${String(e)}`, runs };
+      }
+
+      // 4. Boundary: MISSION_CURRENT_STATUS. A terminal/cancelled mission must not let
+      //    a blocked task be completed. The task itself remains non-completed; the
+      //    mission reconciliation handles terminal status post-hoc.
+      if (task.missionId) {
+        try {
+          const mission = await store.getMission(task.ownerId, task.missionId);
+          if (mission && (mission.status === 'cancelled')) {
+            return { accepted: false, cls: 'blocked', reason: 'mission_cancelled', runs };
+          }
+        } catch {
+          // Indeterminate mission read — do NOT complete; fail closed for this gate.
+          return { accepted: false, cls: 'blocked', reason: 'mission_unreadable', runs };
+        }
+      }
+
+      // 5. Boundary: BUDGET — BUDGET_EXHAUSTED → NO NEW ACCEPTANCE/REPAIR and NO
+      //    FALSE COMPLETION. Reuses the existing CostProtector (no second accounting).
+      try {
+        const costDecision = await costProtector.check(task.ownerId, task.projectId ?? null);
+        if (costDecision.stopped) {
+          return { accepted: false, cls: 'blocked', reason: `budget_exhausted:${costDecision.reason ?? ''}`, runs };
+        }
+      } catch (e) {
+        // Fail closed on budget indeterminacy — never complete without budget clarity.
+        return { accepted: false, cls: 'blocked', reason: `budget_check_failed:${String(e)}`, runs };
+      }
+
+      // 6. Resolve workspace from the trusted passport (never from model/agent args).
+      let workspaceRoot: string | null;
+      try {
+        workspaceRoot = await resolveWorkspaceRoot(task);
+      } catch {
+        workspaceRoot = null;
+      }
+      if (!workspaceRoot) {
+        return { accepted: false, cls: 'blocked', reason: 'workspace_not_resolved', runs };
+      }
+
+      // 7. Run each required operation through the trusted runner.
+      const runner = runOp ?? makeRequirementRunner(workspaceRoot);
+      for (const op of required) {
+        let result: VerificationResult;
+        try {
+          result = await runner(op, workspaceRoot);
+        } catch (e) {
+          result = { ...workspaceNotResolved(op), outcome: 'internal_error', stdout: String(e).slice(0, 200) };
+        }
+        runs.push({
+          operation: op,
+          outcome: result.outcome,
+          ok: result.ok,
+          exitCode: result.exitCode,
+          durationMs: result.durationMs ?? null,
+        });
+        // 7a. Persist minimal trusted evidence (best-effort; never blocks acceptance
+        //     decision on evidence-write failure, but failure is surfaced in reason).
+        try {
+          await store.recordTaskVerification(task.ownerId, {
+            projectId: task.projectId,
+            taskId: task.id,
+            runId: null,
+            attempt: task.attempts + 1,
+            operation: op,
+            outcome: result.outcome,
+            exitCode: result.exitCode,
+            durationMs: result.durationMs ?? null,
+          });
+        } catch (e) {
+          // Do not fabricate evidence; record the write failure so it is observable.
+          console.warn(`[Gate45] verification evidence write failed for task ${task.id}: ${e}`);
+        }
+      }
+
+      // 8. Deterministic decision — ALL required checks must pass; the model cannot
+      //    override a non-passing outcome.
+      const cls = combineClassification(runs.map((r) => r.outcome));
+      if (cls === 'passed') {
+        return { accepted: true, cls, reason: null, runs };
+      }
+      const failedRuns = runs.filter((r) => r.outcome !== 'passed').map((r) => `${r.operation}:${r.outcome}`).join(',');
+      return { accepted: false, cls, reason: `verification_not_passed:${failedRuns}`, runs };
+    },
+  };
+}

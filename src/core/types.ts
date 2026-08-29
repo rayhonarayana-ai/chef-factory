@@ -174,6 +174,16 @@ export interface TaskRecord {
   startedAt: string | null;
   completedAt: string | null;
   updatedAt: string;
+  /**
+   * Gate 45 — Trusted software task completion contract.
+   * When verificationRequired is true, a task may transition to COMPLETED ONLY
+   * after ALL operations in requiredVerifications report outcome 'passed' from a
+   * trusted (server-side) verification run. The model's declaration of success is
+   * advisory only (MODEL_DECLARES_SUCCESS = ADVISORY_ONLY). allowed operations are
+   * the frozen VerificationOperation enum ('test' | 'typecheck' | 'build').
+   */
+  verificationRequired: boolean;
+  requiredVerifications: import('../software/verification/types.js').VerificationOperation[];
 }
 
 // ---------- Mission / plan (Gate 39) ----------
@@ -216,6 +226,10 @@ export interface TaskProposal {
   inputs?: JsonObject;
   maxAttempts?: number;
   successCriteria?: string[];
+  /** Gate 45 — declarative trusted-completion contract. Survives materialization so
+   *  the acceptance gate is machine-readable (not prompt-only). */
+  verificationRequired?: boolean;
+  requiredVerifications?: import('../software/verification/types.js').VerificationOperation[];
 }
 
 export interface DependencyProposal {
@@ -245,6 +259,8 @@ export interface MissionPlanCanonical {
     inputs?: JsonObject;
     maxAttempts?: number;
     successCriteria?: string[];
+    verificationRequired?: boolean;
+    requiredVerifications?: import('../software/verification/types.js').VerificationOperation[];
   }>;
   dependencies: Array<{ prerequisiteKey: string; dependentKey: string }>;
   estimatedBudget?: number | null;
@@ -320,6 +336,28 @@ export interface TaskRunRecord {
   cost: number;
   startedAt: string;
   completedAt: string | null;
+}
+
+// ---------- Gate 45 — Trusted verification evidence ----------
+// Minimal evidence row persisted by the trusted acceptance gate for a verification-
+// REQUIRED task. SYSTEM-OBSERVED (trusted infrastructure writes only; agents/models
+// cannot forge it). Deliberately NOT a general observability/evidence platform.
+// It records only the trusted check outcome, NOT raw stdout/stderr and NOT secrets.
+// manifestHash is intentionally not claimed here: the current verification runner
+// returns manifestHash null, so this evidence does NOT assert immutable artifact
+// integrity (see KNOWN_LIMITATIONS / TASK61 workspace binding note).
+export interface TaskVerificationRecord {
+  id: string;
+  ownerId: string;
+  projectId: string;
+  taskId: string;
+  runId: string | null;
+  attempt: number;
+  operation: import('../software/verification/types.js').VerificationOperation;
+  outcome: import('../software/verification/types.js').VerificationOutcome;
+  exitCode: number | null;
+  durationMs: number | null;
+  observedAt: string;
 }
 
 // ---------- Approvals ----------

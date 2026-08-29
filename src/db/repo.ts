@@ -29,6 +29,7 @@ import type {
   TaskDependencyRecord,
   TaskRecord,
   TaskRunRecord,
+  TaskVerificationRecord,
 } from '../core/types.js';
 import type { AgentStats, AgentWorkload, BudgetReport, Store, WorkforceControlAdminPersistence, ModelHealthPersistence } from '../core/ports.js';
 import { aggregateModelHealth, DEFAULT_HEALTH_POLICY } from '../core/modelHealth.js';
@@ -181,8 +182,9 @@ export class SupabaseStore implements Store, WorkforceControlAdminPersistence, M
       `insert into public.tasks (
          owner_id, project_id, title, description, agent_id, priority, risk_level,
          authority_level, autonomy, approval_required, required_capabilities, preferred_role,
-         status, inputs, max_attempts, correlation_id, mission_id, mission_task_key, created_by
-       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) returning *`,
+         status, inputs, max_attempts, correlation_id, mission_id, mission_task_key, created_by,
+         verification_required, required_verifications
+       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) returning *`,
       [
         ownerId, data.projectId, data.title, data.description ?? null, data.agentId ?? null,
         data.priority ?? 'medium', data.riskLevel ?? 'low', data.authorityLevel ?? null,
@@ -191,6 +193,8 @@ export class SupabaseStore implements Store, WorkforceControlAdminPersistence, M
         data.status ?? 'created',
         JSON.stringify(data.inputs ?? {}), data.maxAttempts ?? 3, data.correlationId ?? null,
         data.missionId ?? null, data.missionTaskKey ?? null, data.createdBy ?? null,
+        data.verificationRequired ?? false,
+        JSON.stringify(data.requiredVerifications ?? []),
       ],
     );
     return rows[0]!;
@@ -599,8 +603,9 @@ export class SupabaseStore implements Store, WorkforceControlAdminPersistence, M
           `INSERT INTO public.tasks (
              owner_id, project_id, title, description, priority, risk_level,
              required_capabilities, preferred_role, status, inputs, max_attempts,
-             mission_id, mission_task_key, created_by, correlation_id
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'created',$9,$10,$11,$12,$13,$14)
+             mission_id, mission_task_key, created_by, correlation_id,
+             verification_required, required_verifications
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'created',$9,$10,$11,$12,$13,$14,$15,$16)
            RETURNING id`,
           [
             ownerId, mission.projectId, p.title, p.description ?? null,
@@ -608,6 +613,8 @@ export class SupabaseStore implements Store, WorkforceControlAdminPersistence, M
             JSON.stringify(p.requiredCapabilities ?? []), p.preferredRole ?? null,
             JSON.stringify(p.inputs ?? {}), p.maxAttempts ?? 3,
             mission.id, p.key, ownerId, null,
+            p.verificationRequired ?? false,
+            JSON.stringify(p.requiredVerifications ?? []),
           ],
         );
         taskIdByKey.set(p.key, tRows.rows[0]!.id);
@@ -805,6 +812,8 @@ export class SupabaseStore implements Store, WorkforceControlAdminPersistence, M
       environmentId: 'environment_id',
       requiredCapabilities: 'required_capabilities',
       preferredRole: 'preferred_role',
+      verificationRequired: 'verification_required',
+      requiredVerifications: 'required_verifications',
     };
     for (const [k, v] of Object.entries(patch) as [keyof import('../core/ports.js').TaskPatch, unknown][]) {
       const col = field[k];
@@ -818,6 +827,26 @@ export class SupabaseStore implements Store, WorkforceControlAdminPersistence, M
       params,
     );
     return rows[0]!;
+  }
+
+  // ————— Gate 45 — Trusted verification evidence —————
+  async recordTaskVerification(ownerId: string, input: Parameters<Store['recordTaskVerification']>[1]): Promise<TaskVerificationRecord> {
+    const task = await this.getTask(ownerId, input.taskId);
+    if (!task) throw new Error('task not found');
+    const rows = await this.q<TaskVerificationRecord>(
+      `insert into public.task_verifications (
+         owner_id, project_id, task_id, run_id, attempt, operation, outcome, exit_code, duration_ms
+       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning *`,
+      [ownerId, input.projectId, input.taskId, input.runId ?? null, input.attempt, input.operation, input.outcome, input.exitCode ?? null, input.durationMs ?? null],
+    );
+    return rows[0]!;
+  }
+  async listTaskVerifications(ownerId: string, taskId: string): Promise<TaskVerificationRecord[]> {
+    const rows = await this.q<TaskVerificationRecord>(
+      `select * from public.task_verifications where owner_id = $1 and task_id = $2 order by observed_at asc`,
+      [ownerId, taskId],
+    );
+    return rows;
   }
 
   // Gate 28: Atomic assignment with TOCTOU protection.

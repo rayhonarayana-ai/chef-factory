@@ -8,7 +8,7 @@ import type {
   JsonObject, LessonInput, MissionInput, MissionPlanCanonical, MissionRecord, ModelInfo,
   ModelHealthObservation, ModelHealthSnapshot,
   PassportRecord, ProjectRecord, RecallItem, RuntimeInfo, TaskDependencyRecord, TaskRecord,
-  TaskRunRecord,
+  TaskRunRecord, TaskVerificationRecord,
 } from '../core/types.js';
 import type { ConversationRecord, ConversationMessage } from '../core/conversation.js';
 import { emptyPassport } from '../core/passport.js';
@@ -47,6 +47,7 @@ export class MemoryStore implements Store, WorkforceControlAdminPersistence, Mod
   conversations: ConversationRecord[] = [];
   conversationMessages: ConversationMessage[] = [];
   missions: MissionRecord[] = [];
+  taskVerifications: TaskVerificationRecord[] = [];
   workforceControl: WorkforceControlRecord | null = {
     singletonKey: 'global',
     globallyEnabled: true,
@@ -103,6 +104,8 @@ export class MemoryStore implements Store, WorkforceControlAdminPersistence, Mod
       attempts: 0, maxAttempts: data.maxAttempts ?? 3, correlationId: data.correlationId ?? null,
       missionId: data.missionId ?? null, missionTaskKey: data.missionTaskKey ?? null,
       createdBy: data.createdBy ?? null, createdAt: now(), startedAt: null, completedAt: null, updatedAt: now(),
+      verificationRequired: data.verificationRequired ?? false,
+      requiredVerifications: data.requiredVerifications ?? [],
     };
     this.tasks.push(t);
     return t;
@@ -350,6 +353,8 @@ export class MemoryStore implements Store, WorkforceControlAdminPersistence, Mod
         priority: p.priority, riskLevel: p.riskLevel, requiredCapabilities: p.requiredCapabilities,
         preferredRole: p.preferredRole ?? null, inputs: p.inputs, maxAttempts: p.maxAttempts,
         status: 'created', missionId: m.id, missionTaskKey: p.key, createdBy: ownerId,
+        verificationRequired: p.verificationRequired ?? false,
+        requiredVerifications: p.requiredVerifications ?? [],
       });
       taskIdByKey.set(p.key, t.id);
     }
@@ -467,6 +472,25 @@ export class MemoryStore implements Store, WorkforceControlAdminPersistence, Mod
     const next = { ...r, ...patch };
     this.taskRuns[this.taskRuns.indexOf(r)] = next;
     return next;
+  }
+
+  // ————— Gate 45 — Trusted verification evidence —————
+  async recordTaskVerification(ownerId: string, input: Parameters<Store['recordTaskVerification']>[1]): Promise<TaskVerificationRecord> {
+    const task = await this.getTask(ownerId, input.taskId);
+    if (!task) throw new Error('task not found');
+    const v: TaskVerificationRecord = {
+      id: uuid(), ownerId, projectId: input.projectId, taskId: input.taskId,
+      runId: input.runId ?? null, attempt: input.attempt,
+      operation: input.operation, outcome: input.outcome,
+      exitCode: input.exitCode ?? null, durationMs: input.durationMs ?? null, observedAt: now(),
+    };
+    this.taskVerifications.push(v);
+    return v;
+  }
+  async listTaskVerifications(ownerId: string, taskId: string): Promise<TaskVerificationRecord[]> {
+    return this.taskVerifications
+      .filter((v) => v.ownerId === ownerId && v.taskId === taskId)
+      .map((v) => ({ ...v }));
   }
 
   // approvals

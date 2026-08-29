@@ -17,10 +17,12 @@
 import type { Store } from '../core/ports.js';
 import type { ExecutionRunner } from '../core/pipeline.js';
 import { runWorkforce, type WorkforceOrchestratorOutcome } from '../core/workforceOrchestrator.js';
+import type { Gate45AcceptanceGateway } from '../core/gate45Acceptance.js';
 import { isGlobalStopActive } from '../core/security/workforceControl.js';
 import { WORKFORCE_SERVICE_ACTOR, WORKFORCE_SERVICE_ACTOR_TYPE, WORKFORCE_SERVICE_AUDIT_ACTOR_ID } from '../core/workforceService.js';
 import { applyJitter, type WorkforceRuntimeConfig } from './config.js';
 import { reconcileOwnerActiveMissions } from '../core/mission/missionRuntime.js';
+import { createVerificationAcceptanceGateway } from '../software/verification/gate45.js';
 
 type Activity = 'work' | 'idle' | 'error';
 
@@ -39,12 +41,16 @@ export interface WorkforceWorkerDeps {
   store: Store;
   execution: ExecutionRunner;
   config: WorkforceRuntimeConfig;
+  /** Gate 45 — optional trusted verification acceptance gateway. When absent, the
+   *  worker constructs the default hardened gateway over `store` at construction. */
+  verification?: Gate45AcceptanceGateway;
 }
 
 export class WorkforceWorker {
   #store: Store;
   #execution: ExecutionRunner;
   #config: WorkforceRuntimeConfig;
+  #verification: Gate45AcceptanceGateway;
 
   #idleStep = 0;
   #errorFails = 0;
@@ -56,6 +62,7 @@ export class WorkforceWorker {
     this.#store = deps.store;
     this.#execution = deps.execution;
     this.#config = deps.config;
+    this.#verification = deps.verification ?? createVerificationAcceptanceGateway({ store: deps.store });
   }
 
   #audit(action: string, metadata: Record<string, unknown> = {}): Promise<void> {
@@ -162,6 +169,7 @@ export class WorkforceWorker {
         result = await runWorkforce({
           store: this.#store,
           execution: this.#execution,
+          verification: this.#verification,
           ownerId,
           actorId: WORKFORCE_SERVICE_ACTOR,
           workforceService: true,

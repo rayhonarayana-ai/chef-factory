@@ -46,6 +46,7 @@ import { parseIntent } from './intent.js';
 import { buildExplanation } from './explanation.js';
 import { getSpecialistProfileByRole } from './specialist/registry.js';
 import { buildSpecialistSystemPrompt } from './specialist/prompt.js';
+import type { Gate45AcceptanceGateway } from './gate45Acceptance.js';
 
 // ---------- Executable Task Statuses ----------
 
@@ -138,6 +139,12 @@ export interface ExecuteAssignedAgentTaskInput {
   agentId: string;
   taskId: string;
   conversationHistory?: ConversationMessage[];
+  /**
+   * Gate 45 — Trusted acceptance gate. When the task requires verification and this
+   * gateway is absent, the task FAILS CLOSED (never completed) because the model's
+   * declaration of success would be the only authority (DISALLOWED).
+   */
+  verification?: Gate45AcceptanceGateway;
 }
 
 /**
@@ -152,7 +159,7 @@ export interface ExecuteAssignedAgentTaskInput {
 export async function executeAssignedAgentTask(
   input: ExecuteAssignedAgentTaskInput,
 ): Promise<AgentExecutionResult> {
-  const { store, execution, ownerId, agentId, taskId, conversationHistory } = input;
+  const { store, execution, ownerId, agentId, taskId, conversationHistory, verification } = input;
   const evidence: string[] = [`agentId=${agentId}`, `ownerId=${ownerId}`, `taskId=${taskId}`];
 
   // 1. Load Agent
@@ -318,8 +325,36 @@ export async function executeAssignedAgentTask(
     metadata: { runId: run.id, ok: outcome.ok, reason: outcome.reason ?? null, durationMs },
   });
 
-  // 14. Handle success
-  if (outcome.ok) {
+  // 14. Handle success — gated by the Gate 45 trusted acceptance gate for
+  //     verification-required software tasks (MODEL_DECLARES_SUCCESS = ADVISORY_ONLY).
+  //     If the gate is required but absent/inconclusive, the task FAILS CLOSED.
+  let shouldComplete = outcome.ok;
+  let notAcceptedReason: string | null = null;
+  let acceptanceClass: 'passed' | 'repairable' | 'nonRepairable' | 'blocked' | null = null;
+
+  const requiresVerification = (claimedTask.requiredVerifications?.length ?? 0) > 0;
+
+  if (outcome.ok && requiresVerification) {
+    if (!verification) {
+      // No trusted gate wired: the model's declaration cannot authorize completion.
+      shouldComplete = false;
+      acceptanceClass = 'blocked';
+      notAcceptedReason = 'trusted_acceptance_gate_missing';
+    } else {
+      try {
+        const decision = await verification.evaluate(claimedTask);
+        shouldComplete = decision.accepted;
+        acceptanceClass = decision.cls;
+        notAcceptedReason = decision.reason;
+      } catch (e) {
+        shouldComplete = false;
+        acceptanceClass = 'blocked';
+        notAcceptedReason = `acceptance_gate_threw:${String(e)}`;
+      }
+    }
+  }
+
+  if (shouldComplete) {
     await store.completeTaskRun(ownerId, run.id, {
       status: 'completed',
       outputSnapshot: (outcome.output ?? null) as Record<string, unknown> | null,
@@ -373,18 +408,69 @@ export async function executeAssignedAgentTask(
     return { ok: true, outcome: 'completed', task: done, agent, authority: authorityResult.authority, autonomy: authorityResult.autonomy, explanation, error: null, evidence };
   }
 
-  // 15. Handle failure -- bounded retries via existing taskEngine
+  // 14b. Verification-required task NOT accepted (or gate missing). The model must
+  //      never override this. Classify deterministically and route: repairable →
+  //      existing bounded retry; nonRepairable/blocked → fail closed (no futile retry,
+  //      no false completion, never overwrite an externally terminal/cancelled task).
+  const isAcceptanceDenial = outcome.ok === true;
+  const failMessage = isAcceptanceDenial
+    ? `verification_not_accepted:${notAcceptedReason ?? 'unknown'}`
+    : String(outcome.error ?? outcome.reason);
+
   await store.completeTaskRun(ownerId, run.id, {
     status: 'failed',
-    error: { message: String(outcome.error ?? outcome.reason) },
+    error: { message: failMessage },
     durationMs,
     cost: 0,
   });
+
   const current = await store.getTask(ownerId, claimedTask.id);
   if (!current) {
-    return finalResult('failed', claimedTask, agent, authorityResult.authority, authorityResult.autonomy, 'Task state lost during failure handling', evidence);
+    return finalResult('failed', claimedTask, agent, authorityResult.authority, authorityResult.autonomy, `Task state lost during ${isAcceptanceDenial ? 'acceptance' : 'failure'} handling`, evidence);
   }
-  const handled = handleTaskFailure(current, outcome.error ?? outcome.reason);
+
+  // NEVER overwrite an externally terminal/cancelled task to completed or to a
+  // different terminal. CANCELLED_TASK_CAN_BE_OVERWRITTEN_COMPLETED = NO.
+  if (current.status === 'cancelled' || current.status === 'completed' || current.status === 'failed') {
+    return finalResult('failed', current, agent, authorityResult.authority, authorityResult.autonomy,
+      `Task is ${current.status}; not overwritten by ${isAcceptanceDenial ? 'acceptance denial' : 'execution failure'}`, evidence);
+  }
+
+  const isRepairableBlocked = acceptanceClass === 'nonRepairable' || acceptanceClass === 'blocked';
+  if (isAcceptanceDenial && isRepairableBlocked) {
+    // Fail closed, terminal. Do NOT requeue (dependency_missing, global stop, budget,
+    // lockdown, cancellation, security denial are never repaired by retrying).
+    await safeAudit(store, {
+      actorType: 'agent',
+      actorId: agentId,
+      action: 'agent.verification.blocked',
+      projectId: claimedTask.projectId,
+      environmentId: null,
+      resourceType: 'task',
+      resourceId: claimedTask.id,
+      authorizationResult: authorityResult.autonomy?.selected ?? null,
+      correlationId,
+      taskId: claimedTask.id,
+      metadata: { reason: notAcceptedReason, attempts: current.attempts + 1, maxAttempts: current.maxAttempts, stopped: true, cls: acceptanceClass },
+    });
+    const failed = await store.patchTask(ownerId, claimedTask.id, {
+      status: 'failed',
+      error: { message: failMessage },
+    });
+    const explanation = buildExplanation({
+      decision: 'Verification-required task failed closed.',
+      why: `Trusted acceptance gate blocked completion (${notAcceptedReason ?? 'verification_not_passed'}). Model declaration is advisory only.`,
+      evidence: ['verificationRequired=true', 'cls=' + String(acceptanceClass)],
+      confidence: 1,
+      risk,
+      outcome: 'failed',
+    });
+    return { ok: false, outcome: 'failed', task: failed, agent, authority: authorityResult.authority, autonomy: authorityResult.autonomy, explanation, error: failMessage, evidence };
+  }
+
+  // Repairable verification failure — reuse the existing bounded TaskEngine retry
+  // mechanism (cross-attempt repair). No new scheduler; attempts remain bounded.
+  const handled = handleTaskFailure(current, failMessage);
   if (handled.transitioned) {
     await store.patchTask(ownerId, claimedTask.id, {
       status: handled.task.status,
@@ -394,7 +480,7 @@ export async function executeAssignedAgentTask(
     await safeAudit(store, {
       actorType: 'agent',
       actorId: agentId,
-      action: handled.stopped ? 'agent.execution_failed_final' : 'agent.execution_retry_pending',
+      action: isAcceptanceDenial ? 'agent.verification_retry_pending' : 'agent.execution_retry_pending',
       projectId: claimedTask.projectId,
       environmentId: null,
       resourceType: 'task',
@@ -402,10 +488,10 @@ export async function executeAssignedAgentTask(
       authorizationResult: authorityResult.autonomy?.selected ?? null,
       correlationId,
       taskId: claimedTask.id,
-      metadata: { attempts: handled.task.attempts, maxAttempts: handled.task.maxAttempts, stopped: handled.stopped },
+      metadata: { attempts: handled.task.attempts, maxAttempts: handled.task.maxAttempts, stopped: handled.stopped, verificationDenied: isAcceptanceDenial ? 'true' : 'false' },
     });
     const explanation = buildExplanation({
-      decision: handled.stopped ? 'Agent execution stopped after exhausting retries.' : 'Agent task failed; retry pending.',
+      decision: handled.stopped ? 'Task stopped after exhausting retries.' : 'Task failed; retry pending.',
       why: handled.stopped
         ? `Reached ${handled.task.attempts}/${handled.task.maxAttempts} attempts. Owner intervention required.`
         : `Attempt ${handled.task.attempts}/${handled.task.maxAttempts} failed. No automatic retry loop is running.`,
@@ -415,10 +501,10 @@ export async function executeAssignedAgentTask(
       outcome: handled.stopped ? 'failed' : 'retry_pending',
     });
     const out = handled.stopped ? 'failed' : 'retry_pending';
-    return { ok: false, outcome: out as AgentExecutionResultOutcome, task: handled.task, agent, authority: authorityResult.authority, autonomy: authorityResult.autonomy, explanation, error: String(outcome.error ?? outcome.reason), evidence };
+    return { ok: false, outcome: out as AgentExecutionResultOutcome, task: handled.task, agent, authority: authorityResult.authority, autonomy: authorityResult.autonomy, explanation, error: failMessage, evidence };
   }
 
-  return finalResult('failed', current, agent, authorityResult.authority, authorityResult.autonomy, handled.error ?? 'execution failed', evidence);
+  return finalResult('failed', current, agent, authorityResult.authority, authorityResult.autonomy, handled.error ?? failMessage, evidence);
 }
 
 // ---------- Helpers ----------

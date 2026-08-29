@@ -53,6 +53,7 @@ import type { PlacementOutcome, PlacementResult } from './placement.js';
 import { placeTask } from './placement.js';
 import type { AgentExecutionResultOutcome } from './agentExecutor.js';
 import { executeAssignedAgentTask } from './agentExecutor.js';
+import type { Gate45AcceptanceGateway } from './gate45Acceptance.js';
 import { CostProtector, DEFAULT_COST_PROTECTION } from './security/costProtection.js';
 import { isGlobalStopActive } from './security/workforceControl.js';
 import { WORKFORCE_SERVICE_ACTOR, WORKFORCE_SERVICE_ACTOR_TYPE, WORKFORCE_SERVICE_AUDIT_ACTOR_ID } from './workforceService.js';
@@ -128,6 +129,8 @@ export interface WorkforceOrchestratorOptions {
   costProtector?: CostProtector;
   signal?: AbortSignal;
   correlationId?: string;
+  /** Gate 45 — trusted verification acceptance gateway applied to verification-required tasks. */
+  verification?: Gate45AcceptanceGateway;
 }
 
 // ---------- Helpers ----------
@@ -196,6 +199,7 @@ export async function runWorkforce(opts: WorkforceOrchestratorOptions): Promise<
     costProtector = new CostProtector(store, DEFAULT_COST_PROTECTION),
     signal,
     correlationId = null,
+    verification,
   } = opts;
 
   const startedAt = new Date().toISOString();
@@ -435,7 +439,7 @@ export async function runWorkforce(opts: WorkforceOrchestratorOptions): Promise<
 
     const results = await Promise.all(
       slice.map((p) =>
-        executeAssignedAgentTask({ store, execution, ownerId, agentId: p.agentId, taskId: p.taskId })
+        executeAssignedAgentTask({ store, execution, ownerId, agentId: p.agentId, taskId: p.taskId, verification })
           .then((r) => ({ kind: 'ok' as const, r, taskId: p.taskId, agentId: p.agentId }))
           .catch((e) => ({ kind: 'err' as const, taskId: p.taskId, agentId: p.agentId, error: String(e) })),
       ),
