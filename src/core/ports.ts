@@ -47,6 +47,8 @@ import type {
   SecurityIncidentPatch,
 } from '../core/security/types.js';
 
+import type { WorkforceControlRecord } from './security/workforceControl.js';
+
 export interface TaskPatch {
   title?: string;
   description?: string | null;
@@ -212,6 +214,14 @@ export interface Store {
   // DISCOVERY ONLY — never assigns, claims, mutates, or grants authority.
   listSchedulableTasks(ownerId: string, filter?: { projectId?: string; limit?: number }): Promise<TaskRecord[]>;
 
+  // ————— Gate 41 — Narrow scheduler owner discovery —————
+  // Returns ONLY the minimal owner identifiers that currently have at least one
+  // schedulable (queued, unassigned, within retry cap, dependencies satisfied) task.
+  // Used by the continuous Workforce to enumerate which owners to run for each
+  // cycle. Read-only, bounded, deterministic ordering (owner_id ASC). It NEVER
+  // loads owner profiles or any cross-owner business data.
+  listOwnersWithSchedulableWork(opts?: { limit?: number }): Promise<string[]>;
+
   // ————— Gate 38 — Task dependency / DAG edges —————
   // Canonical direction: prerequisite_task_id -> dependent_task_id.
   // A dependent task is READY only when ALL prerequisites are 'completed'.
@@ -302,6 +312,10 @@ export interface Store {
   recordCost(event: CostEvent): Promise<void>;
   projectBudget(ownerId: string, projectId: string): Promise<BudgetReport>;
   totalCost(ownerId: string, projectId?: string | null): Promise<number>;
+  // Gate 41: total spend attributed to a mission (sum of cost_events for tasks whose
+  // mission_id = missionId). Deterministic; used to enforce mission budget limits in
+  // the continuous workforce path without weakening owner/project CostProtector.
+  missionCost(ownerId: string, missionId: string): Promise<number>;
 
   // preferences (POS)
   getPreferences(ownerId: string): Promise<JsonObject>;
@@ -364,6 +378,16 @@ export interface Store {
   activateLockdown(ownerId: string, data: { scope?: string; reason: string; activatedBy: string; actorType: 'owner' | 'agent' | 'system' }): Promise<SecurityLockdownRecord>;
   releaseLockdown(ownerId: string, lockdownId: string, data: { releasedBy: string; actorType: 'owner' | 'agent'; reason: string }): Promise<SecurityLockdownRecord | null>;
 
+  // ————— Gate 41 — Global Workforce Emergency Stop (READ ONLY on the general Store) —————
+  // The general runtime Store surface exposes READ access ONLY so Worker/Security code
+  // can fail closed against the durable global control state. WRITE access is deliberately
+  // NOT on this interface: it is a privileged capability (WorkforceControlAdminPersistence)
+  // reachable only through the explicit authorized administrative core function
+  // (setGlobalEmergencyStop), which first validates a system-admin actor. Agents, the
+  // workforce service, the Mission Engine, and specialist roles therefore cannot disable
+  // the global emergency stop through any ordinary runtime dependency.
+  getWorkforceControl(): Promise<WorkforceControlRecord | null>;
+
   // database / RLS health
   rlsProbe(ownerId: string): Promise<RlsProbe>;
 
@@ -388,4 +412,23 @@ export interface Store {
   //   - task.status === 'queued' (eligible)
   // Uses FOR UPDATE + conditional WHERE to prevent concurrent claims.
   claimTaskForExecution(ownerId: string, taskId: string, agentId: string): Promise<ClaimTaskResult>;
+}
+
+// ————— Gate 41 — Privileged Global Workforce Control WRITE persistence —————
+// This is a SEPARATE capability interface, deliberately NOT part of the general `Store`.
+// It is implemented by the persistent repository (and by the in-memory test fake) but is
+// wired/typed ONLY into the trusted administrative composition root. Normal Worker/Agent/
+// Mission/Specialist code receives `Store` (READ only) and therefore cannot reach the raw
+// write. The single production caller is the core authority function `setGlobalEmergencyStop`,
+// which validates a system-admin actor before invoking `setWorkforceControlRaw`.
+//
+// The raw primitive carries NO actorType: authorization has already occurred at the
+// privileged core boundary before this is reached. It persists only the outcome plus the
+// already-authorized admin identity (updated_by) as audit metadata.
+export interface WorkforceControlAdminPersistence {
+  setWorkforceControlRaw(input: {
+    globallyEnabled: boolean;
+    reason: string;
+    updatedBy: string;
+  }): Promise<WorkforceControlRecord>;
 }

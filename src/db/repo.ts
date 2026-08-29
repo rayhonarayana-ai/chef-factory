@@ -28,7 +28,8 @@ import type {
   TaskRecord,
   TaskRunRecord,
 } from '../core/types.js';
-import type { AgentStats, AgentWorkload, BudgetReport, Store } from '../core/ports.js';
+import type { AgentStats, AgentWorkload, BudgetReport, Store, WorkforceControlAdminPersistence } from '../core/ports.js';
+import type { WorkforceControlRecord } from '../core/security/workforceControl.js';
 import { emptyPassport } from '../core/passport.js';
 import { hashMissionPlan } from '../core/mission/missionEngine.js';
 import { getPool } from './pool.js';
@@ -55,7 +56,7 @@ function toCamel(row: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
-export class SupabaseStore implements Store {
+export class SupabaseStore implements Store, WorkforceControlAdminPersistence {
   constructor(private readonly pool = getPool()) {}
 
   private async q<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
@@ -252,6 +253,34 @@ export class SupabaseStore implements Store {
     }
     const res = await this.q<TaskRecord>(sql, params);
     return res.map((r) => ({ ...r }));
+  }
+
+  // ————— Gate 41 — Narrow scheduler owner discovery —————
+  // Returns only the DISTINCT owner_ids that currently have ≥1 schedulable task
+  // (same readiness rules as listSchedulableTasks). Read-only, bounded, deterministic.
+  // Sourced from tasks_schedulable_discovery_idx (owner_id/status/agent_id leading
+  // columns), so no new index is required. Returns only identifiers, never profiles.
+  async listOwnersWithSchedulableWork(opts?: { limit?: number }): Promise<string[]> {
+    const limit = opts?.limit !== undefined && Number.isFinite(opts.limit) && opts.limit! > 0 ? Math.min(Math.floor(opts.limit!), 500) : 100;
+    const rows = await this.q<{ ownerId: string }>(
+      `select distinct owner_id as "ownerId"
+       from public.tasks
+       where agent_id is null
+         and status = 'queued'
+         and attempts < coalesce(max_attempts, 3)
+         and NOT EXISTS (
+           SELECT 1 FROM public.task_dependencies d
+           WHERE d.dependent_task_id = tasks.id
+             AND NOT EXISTS (
+               SELECT 1 FROM public.tasks pr
+               WHERE pr.id = d.prerequisite_task_id AND pr.status = 'completed'
+             )
+         )
+       order by owner_id asc
+       limit $1`,
+      [limit],
+    );
+    return rows.map((r) => r.ownerId);
   }
 
   // ---------- Gate 38: Task dependency / DAG edges ----------
@@ -1193,6 +1222,20 @@ export class SupabaseStore implements Store {
     };
   }
 
+  // Gate 41: total spend attributed to a mission (sum over cost_events for tasks whose
+  // mission_id = missionId and owned by this owner). Deterministic; drives mission-budget
+  // enforcement in the continuous workforce path without weakening owner/project limits.
+  async missionCost(ownerId: string, missionId: string): Promise<number> {
+    const rows = await this.q<{ sum: string | null }>(
+      `select sum(c.amount) as sum
+       from public.cost_events c
+       join public.tasks t on t.id = c.task_id
+       where t.owner_id = $1 and t.mission_id = $2`,
+      [ownerId, missionId],
+    );
+    return Number(rows[0]?.sum ?? 0);
+  }
+
   // ---------- preferences (POS) ----------
   async getPreferences(ownerId: string): Promise<JsonObject> {
     const rows = await this.q<{ category: string; key: string; value: unknown; version: number; isActive: boolean }>(
@@ -1603,6 +1646,36 @@ export class SupabaseStore implements Store {
       [ownerId, lockdownId, data.releasedBy, new Date().toISOString()],
     );
     return { ...current, status: 'released', releasedBy: data.releasedBy, releasedAt: new Date().toISOString() };
+  }
+
+  // ————— Gate 41 — Global Workforce Emergency Stop —————
+  // READ is part of the general Store (worker/security fail-close against it).
+  async getWorkforceControl(): Promise<WorkforceControlRecord | null> {
+    const rows = await this.q<WorkforceControlRecord>(
+      `select singleton_key as "singletonKey", globally_enabled as "globallyEnabled",
+              reason, updated_by as "updatedBy", updated_at as "updatedAt"
+       from public.workforce_control where singleton_key = 'global' limit 1`,
+      [],
+    );
+    return rows[0] ?? null;
+  }
+
+  // Privileged raw WRITE primitive — implemented here (Repo also satisfies
+  // WorkforceControlAdminPersistence) but NOT part of the general Store interface.
+  // It is reachable ONLY through setGlobalEmergencyStop after system-admin authority
+  // validation. No actorType is carried: authorization already occurred at the
+  // privileged core boundary; the authorized admin identity is persisted as updated_by.
+  async setWorkforceControlRaw(input: { globallyEnabled: boolean; reason: string; updatedBy: string }): Promise<WorkforceControlRecord> {
+    await this.q(
+      `insert into public.workforce_control (singleton_key, globally_enabled, reason, updated_by, updated_at)
+       values ('global', $1, $2, $3, now())
+       on conflict (singleton_key) do update
+         set globally_enabled = $1, reason = $2, updated_by = $3, updated_at = now()`,
+      [input.globallyEnabled, input.reason, input.updatedBy],
+    );
+    const row = await this.getWorkforceControl();
+    if (!row) throw new Error('workforce_control singleton missing after write');
+    return row;
   }
 
   async rlsProbe(ownerId: string): Promise<RlsProbe> {

@@ -27,6 +27,7 @@ import { PersistentAnomalyDetector } from '../core/security/anomaly.js';
 import { createRateLimitPersistence, createAnomalyPersistence } from '../db/gate14Persistence.js';
 import { getRedactor } from './redact.js';
 import { handleStreamingChat } from './streaming.js';
+import { startWorker } from '../runtime/worker.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC_DIR = resolve(__dirname, '..', '..', 'public');
@@ -320,9 +321,15 @@ export async function startServer(opts?: { port?: number; host?: string }): Prom
   console.log(`CHEF FACTORY Control Plane listening on http://${host}:${port}`);
   console.log('Public UI screens: CHEF Chat, Projects, Passport, Agents, Tasks, Approvals, Costs, Audit, Daily Status');
 
+  // Gate 41: OPT-IN workforce worker autostart. OFF by default (no silent autostart).
+  const workerHandle = process.env['FACTORY_WORKER_AUTOSTART'] === 'true'
+    ? await startWorker()
+    : null;
+
   return {
     close: () =>
       new Promise<void>((resolveClose) => {
+        workerHandle?.stop();
         server.close(async () => {
           await pool.end().catch(() => undefined);
           resolveClose();

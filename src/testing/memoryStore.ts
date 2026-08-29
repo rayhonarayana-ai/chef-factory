@@ -1,7 +1,7 @@
 // Test fixture — in-memory Store implementation (deterministic, no I/O).
 // Used by pipeline / isolation / audit unit tests. NOT shipped in build.
 
-import type { Store, TaskPatch, ApprovalPatch, AgentStats, AgentWorkload, BudgetReport } from '../core/ports.js';
+import type { Store, TaskPatch, ApprovalPatch, AgentStats, AgentWorkload, BudgetReport, WorkforceControlAdminPersistence } from '../core/ports.js';
 import type {
   AgentRecord, AgentDefinition, AgentPatch,
   ApprovalRecord, AuditEvent, AutonomyDecision, CostEvent, DailyStatus, DecisionRecord,
@@ -16,12 +16,13 @@ import { CRITICAL_ACTIONS } from '../core/security/criticalActions.js';
 import { toSecurityEventRecord } from '../core/security/events.js';
 import { toIncidentRecord, applyIncidentPatch } from '../core/security/incidents.js';
 import { toLockdownRecord, canReleaseLockdown } from '../core/security/lockdown.js';
+import type { WorkforceControlRecord } from '../core/security/workforceControl.js';
 import { missionCanTransition, hashMissionPlan } from '../core/mission/missionEngine.js';
 
 const uuid = (): string => crypto.randomUUID();
 const now = (): string => new Date().toISOString();
 
-export class MemoryStore implements Store {
+export class MemoryStore implements Store, WorkforceControlAdminPersistence {
   projects: ProjectRecord[] = [];
   passports: PassportRecord[] = [];
   tasks: TaskRecord[] = [];
@@ -43,6 +44,13 @@ export class MemoryStore implements Store {
   conversations: ConversationRecord[] = [];
   conversationMessages: ConversationMessage[] = [];
   missions: MissionRecord[] = [];
+  workforceControl: WorkforceControlRecord | null = {
+    singletonKey: 'global',
+    globallyEnabled: true,
+    reason: 'initial state — global workforce enabled',
+    updatedBy: 'system',
+    updatedAt: now(),
+  };
 
   // projects / passports
   async getProjectBySlug(ownerId: string, slug: string): Promise<ProjectRecord | null> {
@@ -118,6 +126,22 @@ export class MemoryStore implements Store {
     const limit = filter?.limit;
     const limited = limit !== undefined ? rows.slice(0, limit) : rows;
     return limited.map((t) => ({ ...t }));
+  }
+
+  // Gate 41: narrow scheduler owner discovery — distinct owners with ≥1 schedulable task.
+  async listOwnersWithSchedulableWork(opts?: { limit?: number }): Promise<string[]> {
+    const maxAttempts = 3;
+    const limit = opts?.limit !== undefined && Number.isFinite(opts.limit) && opts.limit! > 0 ? Math.min(Math.floor(opts.limit!), 500) : 100;
+    const owners = new Set<string>();
+    for (const t of this.tasks) {
+      if (t.agentId !== null) continue;
+      if (t.status !== 'queued') continue;
+      if (t.attempts >= (t.maxAttempts && t.maxAttempts > 0 ? t.maxAttempts : maxAttempts)) continue;
+      if (!this.isDependencyReady(t)) continue;
+      owners.add(t.ownerId);
+      if (owners.size >= limit) break;
+    }
+    return Array.from(owners).sort();
   }
 
   // ---------- Gate 38: Task dependency / DAG edges (MemoryStore parity) ----------
@@ -475,6 +499,14 @@ export class MemoryStore implements Store {
   async projectBudget(ownerId: string, projectId: string): Promise<BudgetReport> {
     return { period: 'month', amount: await this.totalCost(ownerId, projectId), daily: 0, maxAmount: null, exceeded: false };
   }
+  async missionCost(ownerId: string, missionId: string): Promise<number> {
+    const missionTasks = new Set(
+      this.tasks.filter((t) => t.ownerId === ownerId && t.missionId === missionId).map((t) => t.id),
+    );
+    return this.costs
+      .filter((c) => c.ownerId === ownerId && c.taskId !== null && missionTasks.has(c.taskId))
+      .reduce((s, c) => s + c.amount, 0);
+  }
 
   // preferences
   async getPreferences(ownerId: string): Promise<JsonObject> {
@@ -682,6 +714,25 @@ export class MemoryStore implements Store {
     const record: SecurityLockdownRecord = { ...current, status: 'released', releasedBy: data.releasedBy, releasedAt: now() };
     this.securityLockdowns[idx] = record;
     return record;
+  }
+
+  // ————— Gate 41 — Global Workforce Emergency Stop —————
+  // READ on the general Store surface (worker/security fail-close against it).
+  async getWorkforceControl(): Promise<WorkforceControlRecord | null> {
+    return this.workforceControl ? { ...this.workforceControl } : null;
+  }
+
+  // Privileged raw WRITE primitive — implements WorkforceControlAdminPersistence, NOT part
+  // of the general Store. Reachable only via setGlobalEmergencyStop after authority checks.
+  async setWorkforceControlRaw(input: { globallyEnabled: boolean; reason: string; updatedBy: string }): Promise<WorkforceControlRecord> {
+    this.workforceControl = {
+      singletonKey: 'global',
+      globallyEnabled: input.globallyEnabled,
+      reason: input.reason,
+      updatedBy: input.updatedBy,
+      updatedAt: now(),
+    };
+    return { ...this.workforceControl };
   }
 
   async rlsProbe(ownerId: string): Promise<RlsProbe> {
