@@ -40,9 +40,10 @@ const REASONING_RANK: Record<string, number> = { none: 0, low: 1, medium: 2, hig
 const CODING_RANK: Record<string, number> = { none: 0, low: 1, medium: 2, high: 3 };
 
 export interface RouterHealthSource {
-  /** Deterministic availability per provider. Providers with no data are available
-   *  (cold-start behavior is explicit: default available). */
-  signal(provider: string): ProviderHealthSignal;
+  /** Deterministic signal per provider AND optionally per model. Providers/models
+   *  with no durable telemetry are NEUTRAL (available, cold-start policy). The
+   *  router is READ-ONLY here; it never writes telemetry. */
+  signal(provider: string, modelId?: string): ProviderHealthSignal;
 }
 
 /** Default cold-start health source: no health data => all providers available. */
@@ -115,13 +116,18 @@ export class ModelRouter {
       ...over,
     });
 
-    // 1. Filter by registry status. Retired models can never be used. 'limited'
-    //    models are eligible under the same stack but are ranked after 'active'
-    //    as a deterministic tie-break (limited = reduced confidence in capacity).
-    const nonRetired = models.filter((m) => m.status !== 'retired');
-
-    // 2. Capability floors BEFORE cost.
-    const capable = nonRetired.filter((m) => meetsFloor(m, req));
+    // ─── Canonical Gate 43 routing order (frozen contract) ───────────────────
+    //  1. mandatory capability floor            → meetsFloor(...) applies FIRST to
+    //                                              ALL registered models.
+    //  2. security/high-impact quality floor    → the same combined mandatory floor
+    //                                              (reasoning/tools/context/coding/
+    //                                              multimodal/structuredOutput) is an
+    //                                              ABSOLUTE gate — never relaxed for
+    //                                              health or cost.
+    //  3. registry status / enabled             → status !== 'retired'.
+    // The capability+quality floor (steps 1-2) is a hard, health-independent gate:
+    // HEALTH_CAN_OVERRIDE_CAPABILITY_FLOOR = NO, HEALTH_CAN_OVERRIDE_QUALITY_FLOOR = NO.
+    const capable = models.filter((m) => meetsFloor(m, req)); // steps 1 & 2
 
     if (capable.length === 0) {
       // Fail closed: nothing capable of the mandatory floor.
@@ -129,7 +135,7 @@ export class ModelRouter {
         outcome: 'no_capable_model',
         selection: {
           model: null,
-          reason: `No registered model satisfies the mandatory capability floor (${reqSummary}). Nothing was invented and no credits were spent.`,
+          reason: `No registered model satisfies the mandatory capability/quality floor (${reqSummary}). Nothing was invented and no credits were spent.`,
           cheapestCapable: false,
           candidates: [],
         },
@@ -140,26 +146,68 @@ export class ModelRouter {
       };
     }
 
-    // 3. Health-aware exclusion (deterministic; no network call).
-    const healthByProvider = new Map<string, boolean>();
-    for (const m of capable) healthByProvider.set(m.provider, true);
-    const available = capable.filter((m) => {
-      const signal = this.runtime.health.signal(m.provider);
-      if (signal.available === false) {
-        healthByProvider.set(m.provider, false);
-        return false;
-      }
-      healthByProvider.set(m.provider, true);
-      return true;
+    // ─── Canonical Gate 43 routing order (frozen contract), continued ────────
+    //  1. mandatory capability floor            → meetsFloor(...)
+    //  2. security/high-impact quality floor    → same combined mandatory floor
+    //  3. registry status / enabled             → status !== 'retired'
+    //  4. budget eligibility                    → affordable filter (BEFORE health)
+    //  5. hard health exclusion                 → explicit unavailable/open excluded
+    //  6. adaptive health/latency ranking       → rankCandidates (availability first)
+    //  7. cost ranking                          → cost within availability class
+    //  8. deterministic tie-break               → stable identity (name)
+    //  9. bounded fallback                      → fallbackChain (maxFallbacks)
+    //
+    // HEALTH_CAN_OVERRIDE_CAPABILITY_FLOOR = NO
+    // HEALTH_CAN_OVERRIDE_QUALITY_FLOOR = NO
+    // Budget eligibility precedes health exclusion/ranking: a candidate that cannot
+    // be afforded is dropped before health is consulted, and a capable/affordable
+    // candidate can never be dropped due to a cheaper-but-incapable one.
+    const qualified = capable.filter((m) => m.status !== 'retired'); // steps 3 (registry)
+
+    // Step 4: budget eligibility — BEFORE hard health exclusion.
+    const affordable = qualified.filter((m) =>
+      this.runtime.budget ? this.runtime.budget.costOfCandidate(costOfModel(m)) : true,
+    );
+
+    if (affordable.length === 0) {
+      return {
+        outcome: 'budget_exhausted',
+        selection: {
+          model: null,
+          reason: `No capable model fits the remaining budget. Failing CLOSED rather than downgrading required capability.`,
+          cheapestCapable: false,
+          candidates: qualified,
+        },
+        rationale: rationaleBase({
+          capableCount: capable.length,
+          excludedUnavailable: 0,
+          rejectionReason: 'budget_exhausted',
+        }),
+      };
+    }
+
+    // Step 5: hard health exclusion. Signal per affordable model (provider+modelId);
+    // computed once for exclusion AND adaptive ranking. Only an EXPLICIT unavailable
+    // (open circuit / 'unavailable') is excluded; 'degraded' candidates remain
+    // ELIGIBLE (DEGRADED vs UNAVAILABLE — a degraded capable candidate still beats a
+    // healthy incapable one because the incapable model never cleared the floor).
+    // Cold-start/insufficient telemetry is NEUTRAL => available.
+    const signalByModel = new Map<string, ProviderHealthSignal>();
+    for (const m of affordable) {
+      signalByModel.set(m.id, this.runtime.health.signal(m.provider, m.id));
+    }
+    const available = affordable.filter((m) => {
+      const signal = signalByModel.get(m.id);
+      return signal ? signal.available !== false : true;
     });
-    const excludedUnavailable = capable.length - available.length;
+    const excludedUnavailable = affordable.length - available.length;
 
     if (available.length === 0) {
       return {
         outcome: 'no_capable_model',
         selection: {
           model: null,
-          reason: `Capable models exist but all matched providers are currently unavailable. Nothing was invented and no credits were spent.`,
+          reason: `Capable, affordable models exist but all matched providers/models are currently unavailable. Nothing was invented and no credits were spent.`,
           cheapestCapable: false,
           candidates: [],
         },
@@ -171,40 +219,22 @@ export class ModelRouter {
       };
     }
 
-    // 4. Budget-awareness: deterministically select among candidates we can afford.
-    //    If NO capable candidate fits the remaining budget => fail CLOSED. We never
-    //    drop below the capability floor to fit a budget (COST vs BUDGET separation).
-    const ranked = rankCandidates(available, this.runtime.preferCheapest);
-    const affordable = ranked.filter((m) =>
-      this.runtime.budget ? this.runtime.budget.costOfCandidate(costOfModel(m)) : true,
-    );
+    // Steps 6-8: adaptive ranking. latencySensitive=true = availability class ->
+    // latency bucket -> cost -> stable identity. latencySensitive=false = availability
+    // class -> cost -> stable identity (latency bucket is NEVER a ranking dimension
+    // when latencySensitive is false). AVAILABLE always outranks DEGRADED regardless
+    // of price. Step 9 (bounded fallback) via fallbackChain below.
+    const ranked = rankCandidates(available, this.runtime.preferCheapest, signalByModel, req.latencySensitive === true);
 
-    if (affordable.length === 0) {
-      return {
-        outcome: 'budget_exhausted',
-        selection: {
-          model: null,
-          reason: `No capable model fits the remaining budget. Failing CLOSED rather than downgrading required capability.`,
-          cheapestCapable: false,
-          candidates: ranked,
-        },
-        rationale: rationaleBase({
-          capableCount: capable.length,
-          excludedUnavailable,
-          rejectionReason: 'budget_exhausted',
-        }),
-      };
-    }
-
-    // Capable + affordable, ranked deterministically. First = primary.
-    const primary = affordable[0]!;
-    const fallbackChain = affordable.slice(1, 1 + this.runtime.maxFallbacks);
+    // Capable + affordable + available, ranked deterministically. First = primary.
+    const primary = ranked[0]!;
+    const fallbackChain = ranked.slice(1, 1 + this.runtime.maxFallbacks);
 
     return {
       outcome: 'selected',
       selection: {
         model: primary,
-        reason: `Cheapest capable model selected: ${primary.provider}/${primary.name}.`,
+        reason: `Capable, affordable model selected: ${primary.provider}/${primary.name}.`,
         cheapestCapable: primary.id === ranked[0]!.id,
         candidates: [primary, ...fallbackChain],
       },
@@ -215,6 +245,9 @@ export class ModelRouter {
         selectedModel: primary.name,
         estimatedCost: costOfModel(primary),
         fallbackIndex: 0,
+        selectedAvailability: signalByModel.get(primary.id)?.availability ?? null,
+        selectedLatencyBucket: signalByModel.get(primary.id)?.latencyBucket ?? null,
+        selectedObservationCount: signalByModel.get(primary.id)?.observationCount ?? null,
       }),
     };
   }
@@ -299,14 +332,53 @@ function meetsFloor(m: ModelInfo, req: ModelRoutingRequirements): boolean {
   return true;
 }
 
-function rankCandidates(models: ModelInfo[], preferCheapest: boolean): ModelInfo[] {
-  const sorted = [...models].sort((a, b) => {
-    const ca = costOfModel(a);
-    const cb = costOfModel(b);
-    if (ca !== cb) return ca - cb;
-    // deterministic tie-break by name (provider-neutral)
-    return a.name.localeCompare(b.name);
-  });
+function availabilityRank(signal: ProviderHealthSignal | undefined): number {
+  const av = signal?.availability ?? 'unknown';
+  // 'available' and 'unknown' (cold start/insufficient) are treated as NEUTRAL and
+  // equal — a cold-start candidate is never artificially superior. 'degraded' ranks
+  // after healthy; 'unavailable' would already have been excluded above.
+  return av === 'available' || av === 'unknown' ? 0 : av === 'degraded' ? 1 : 2;
+}
+
+function latencyBucketRank(signal: ProviderHealthSignal | undefined): number {
+  const b = signal?.latencyBucket ?? 'unknown';
+  switch (b) {
+    case 'low': return 0;
+    case 'unknown': return 1; // neutral between low and medium
+    case 'medium': return 2;
+    default: return 3; // 'high'
+  }
+}
+
+function rankCandidates(
+  models: ModelInfo[],
+  preferCheapest: boolean,
+  signalByModel: Map<string, ProviderHealthSignal>,
+  latencySensitive: boolean,
+): ModelInfo[] {
+  // Canonical adaptive ranking. AVAILABLE always precedes DEGRADED in BOTH modes —
+  // a cheaper degraded candidate can never beat a more expensive AVAILABLE one.
+  // latencySensitive=true also uses the latency bucket as a ranking dimension;
+  // latencySensitive=false NEVER uses the latency bucket (cost breaks availability
+  // ties instead). Deterministic identity (name) is always the final tie-break.
+  const sortFn = latencySensitive
+    ? (a: ModelInfo, b: ModelInfo): number => {
+        const byAv = availabilityRank(signalByModel.get(a.id)) - availabilityRank(signalByModel.get(b.id));
+        if (byAv !== 0) return byAv;
+        const byBucket = latencyBucketRank(signalByModel.get(a.id)) - latencyBucketRank(signalByModel.get(b.id));
+        if (byBucket !== 0) return byBucket;
+        const byCost = costOfModel(a) - costOfModel(b);
+        if (byCost !== 0) return byCost;
+        return a.name.localeCompare(b.name);
+      }
+    : (a: ModelInfo, b: ModelInfo): number => {
+        const byAv = availabilityRank(signalByModel.get(a.id)) - availabilityRank(signalByModel.get(b.id));
+        if (byAv !== 0) return byAv;
+        const byCost = costOfModel(a) - costOfModel(b);
+        if (byCost !== 0) return byCost;
+        return a.name.localeCompare(b.name);
+      };
+  const sorted = [...models].sort(sortFn);
   // 'limited' models rank after a same-cost 'active' candidate deterministically.
   sorted.sort((a, b) => {
     if (costOfModel(a) === costOfModel(b)) {

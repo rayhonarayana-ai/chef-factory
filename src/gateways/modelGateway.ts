@@ -15,7 +15,7 @@
 //   ROUTING_NETWORK_CALLS_BASELINE = 0
 //   MODEL_SELECTION_GRANTS_AUTHORITY = NO
 
-import type { ModelInfo, ModelSelection, ModelSelectionRequest } from '../core/types.js';
+import type { ModelCircuitState, ModelInfo, ModelSelection, ModelSelectionRequest } from '../core/types.js';
 import { ModelRouter, type RouterHealthSource, type RouterRuntime } from '../core/modelRouter.js';
 import type { ProviderAdapter } from './providerAdapter.js';
 import type { ResilientAdapter } from './resilience.js';
@@ -35,13 +35,9 @@ export class ModelGateway {
     // Health awareness: surfaced from the adapters map if available (resilient
     // adapters expose getHealth()); cold-start/no-health-data => available.
     const health: RouterHealthSource = {
-      signal: (provider: string): { provider: string; available: boolean } => {
-        const a = this.adapters.get(provider);
-        if (a && typeof (a as ResilientAdapter).getHealth === 'function') {
-          const h = (a as ResilientAdapter).getHealth();
-          return { provider, available: h.circuitState !== 'open' };
-        }
-        return { provider, available: true };
+      signal: (provider: string, modelId?: string): { provider: string; modelId?: string; available: boolean; circuitState: ModelCircuitState } => {
+        const circuit = this.circuitStateFor(provider);
+        return { provider, modelId, available: circuit.available, circuitState: circuit.circuitState };
       },
     };
     this.router =
@@ -58,14 +54,21 @@ export class ModelGateway {
     return this.adapters.get(provider) ?? null;
   }
 
-  /** Router-level health source (used by execution fallback). */
-  healthFor(provider: string): { provider: string; available: boolean } {
+  /** Router-level health source (used by execution fallback). Returns the live,
+   *  provider-wide circuit state (truthfully provider-scoped) plus availability.
+   *  Durable per-model telemetry is combined by the execution-level health source. */
+  healthFor(provider: string): { provider: string; available: boolean; circuitState: ModelCircuitState } {
+    return this.circuitStateFor(provider);
+  }
+
+  private circuitStateFor(provider: string): { provider: string; available: boolean; circuitState: ModelCircuitState } {
     const a = this.adapters.get(provider);
     if (a && typeof (a as ResilientAdapter).getHealth === 'function') {
       const h = (a as ResilientAdapter).getHealth();
-      return { provider, available: h.circuitState !== 'open' };
+      const circuit = h.circuitState;
+      return { provider, available: circuit !== 'open', circuitState: circuit };
     }
-    return { provider, available: true };
+    return { provider, available: true, circuitState: 'unknown' };
   }
 
   // Compatibility wrapper — delegates to the canonical ModelRouter. No selection

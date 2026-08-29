@@ -5,7 +5,7 @@
 // Gate 4: conversation history, securityGuard wiring, authority resolution,
 // anomaly counters, failure-rate-limit scopes.
 
-import type { Store } from '../core/ports.js';
+import type { ModelHealthPersistence, Store } from '../core/ports.js';
 import type { ActorContext, ConversationMessage, ExecutionOutcome, ExecutionRunner, PlanStepsResult } from '../core/pipeline.js';
 import type { ParsedIntent, TaskRecord, ModelInfo } from '../core/types.js';
 import { evaluateAuthority, riskFromAction } from '../core/authority.js';
@@ -13,7 +13,12 @@ import {
   ModelRouter,
   type RouterHealthSource,
 } from '../core/modelRouter.js';
-import type { ModelRoutingRequirements, ModelRoutingResult } from '../core/types.js';
+import {
+  classifyModelCallOutcome,
+  buildProviderHealthSignal,
+  DEFAULT_HEALTH_POLICY,
+} from '../core/modelHealth.js';
+import type { ModelHealthObservation, ModelHealthOutcome, ModelHealthSnapshot, ModelRoutingRequirements, ModelRoutingResult, ProviderHealthSignal } from '../core/types.js';
 import { ModelGateway } from '../gateways/modelGateway.js';
 import { RuntimeGateway } from '../gateways/runtimeGateway.js';
 import { costForTokens, estimateTokens, type ProviderAdapter } from '../gateways/providerAdapter.js';
@@ -33,6 +38,44 @@ export const FACTORY_MAX_TOOL_ROUNDS = 10;
 // ─── Gate 22: Execution Timeout ──────────────────────────────────────
 /** Default single-step execution timeout (60 seconds). */
 export const EXECUTION_TIMEOUT_MS = 60_000;
+
+// ─── Gate 43: Model Health Telemetry (trusted execution boundary) ────
+// Persist ONE SYSTEM-OBSERVED logical model observation. Monotonic duration via
+// performance.now(). NEVER throws — telemetry can't break execution. The narrow
+// write port (ModelHealthPersistence) is wired ONLY into this trusted collector;
+// the router never writes (ROUTER_CAN_WRITE_HEALTH_TELEMETRY = NO).
+function safeNow(): number {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now();
+}
+
+async function persistModelHealth(
+  modelHealth: ModelHealthPersistence | undefined,
+  ownerId: string,
+  provider: string,
+  modelId: string,
+  fallbackIndex: number,
+  outcome: ModelHealthOutcome,
+  latencyMs: number,
+  usageObserved: boolean,
+): Promise<void> {
+  if (!modelHealth || provider.length === 0 || modelId.length === 0) return;
+  try {
+    await modelHealth.recordModelHealthObservation({
+      ownerId,
+      provider,
+      modelId,
+      outcome,
+      latencyMs: Math.max(0, Math.round(latencyMs)),
+      usageObserved,
+      fallbackIndex,
+      observedAt: new Date().toISOString(),
+    });
+  } catch {
+    /* telemetry is best-effort; never break execution */
+  }
+}
 
 // ─── Gate 11: Conversation Token Budget ─────────────────────────────
 /** Default conversation token budget. Rough estimate: 1 token ≈ 4 chars. */
@@ -103,6 +146,11 @@ export interface ExecutionRunnerOptions {
   /** Gate 42: canonical provider-neutral router. Defaults to an unconfigured
    *  ModelRouter (no health/budget) when omitted. MUST NOT be an authority. */
   router?: ModelRouter;
+  /** Gate 43: narrow trusted persistence port for SYSTEM-OBSERVED model health
+   *  telemetry. When present, the trusted execution boundary records ONE logical
+   *  observation per model call. The router NEVER writes through this — read-only
+   *  durable snapshots come via `store`. */
+  modelHealth?: ModelHealthPersistence;
 }
 
 const INFO_VERBS = new Set(['ask', 'status', 'list', 'read', 'plan', 'research']);
@@ -129,7 +177,7 @@ export function computeNeededReasoning(intent: ParsedIntent): 'none' | 'low' | '
  * when present; otherwise derives from the intent. Never names a provider/model.
  */
 export function buildRoutingRequirements(
-  ctx: Pick<ActorContext, 'agentReasoning'>,
+  ctx: Pick<ActorContext, 'agentReasoning' | 'agentLatencySensitive'>,
   intent: ParsedIntent,
 ): ModelRoutingRequirements {
   return {
@@ -139,17 +187,30 @@ export function buildRoutingRequirements(
     minContextWindow: null,
     mandatory: true,
     maxCostPerCall: null,
+    latencySensitive: ctx.agentLatencySensitive ?? false,
   };
 }
 
 export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRunner {
   const secrets = opts.secretProvider ?? createEnvSecretProvider();
   const toolDefs = GATE3_TOOLS;
-  // Gate 42: canonical provider-neutral router. When not injected, build one whose
-  // health source derives from the adapters surfaced by the ModelGateway (open
-  // circuits deprioritize/exclude a provider deterministically; cold-start => available).
+  // Gate 43: canonical router health source combines the owner's durable health
+  // snapshot batch with the LIVE provider-wide circuit from the resilient adapter.
+  // One bounded batch is loaded per routing cycle (no aggregation per candidate);
+  // route() itself stays synchronous/pure. Cold-start/no telemetry => NEUTRAL available.
+  const ownerHealth: { batch: Map<string, ModelHealthSnapshot> } = { batch: new Map() };
+
+  async function loadHealthBatch(ownerId: string): Promise<void> {
+    const snapshots = await opts.store.getModelHealthSnapshots(ownerId);
+    ownerHealth.batch = new Map(snapshots.map((s) => [`${s.provider}::${s.modelId}`, s]));
+  }
+
   const healthSource: RouterHealthSource = {
-    signal: (provider) => opts.modelGateway.healthFor(provider),
+    signal: (provider, modelId) => {
+      const live = opts.modelGateway.healthFor(provider);
+      const snap = modelId ? ownerHealth.batch.get(`${provider}::${modelId}`) : undefined;
+      return buildProviderHealthSignal(snap, live.circuitState);
+    },
   };
   const router = opts.router ?? new ModelRouter({ preferCheapest: true, health: healthSource });
 
@@ -173,6 +234,7 @@ export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRu
     // grants authority or bypasses security/budget.
     const models = await opts.store.listModels(ctx.ownerId);
     const req = buildRoutingRequirements(ctx, intent);
+    await loadHealthBatch(ctx.ownerId);
     let routing: ModelRoutingResult = router.route(models, req);
 
     if (routing.outcome !== 'selected') {
@@ -228,10 +290,11 @@ export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRu
         unavailable.add(selection.model.id);
         continue;
       }
+      let healthStart = 0;
       try {
         // Gate 3: tool calling loop
         if (adapter.supportsTools()) {
-          return await runToolLoop(adapter, selection.model, toolDefs, task, ctx, intent, secrets, opts.toolDb, conversationHistory, opts.securityGuardian, opts.rateLimiter, opts.anomalyDetector, opts.store, signal);
+          return await runToolLoop(adapter, selection.model, toolDefs, task, ctx, intent, secrets, opts.toolDb, conversationHistory, opts.securityGuardian, opts.rateLimiter, opts.anomalyDetector, opts.store, signal, opts.modelHealth, attempt);
         }
         // G5-02: Fallback: text-only — must still pass through rate limit check
         if (opts.rateLimiter) {
@@ -247,6 +310,7 @@ export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRu
         const historyText = conversationHistory && conversationHistory.length > 0
           ? truncateConversationHistory(conversationHistory).map((m) => `[${m.role}]: ${m.content}`).join('\n') + '\n'
           : '';
+        healthStart = safeNow();
         const response = await adapter.complete({
           model: selection.model.name,
           system: systemPrompt(ctx),
@@ -258,6 +322,7 @@ export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRu
           temperature: 0,
           signal,
         });
+        await persistModelHealth(opts.modelHealth, ctx.ownerId, selection.model.provider, selection.model.id, attempt, 'success', safeNow() - healthStart, response.usage != null);
         const inputTokens = response.usage?.inputTokens ?? estimateTokens(systemPrompt(ctx) + task.title);
         const outputTokens = response.usage?.outputTokens ?? estimateTokens(response.text);
         const cost = costForTokens(
@@ -277,6 +342,12 @@ export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRu
         // Gate 22: re-throw abort errors so outer execute() can detect timeout.
         if (e instanceof DOMException && e.name === 'AbortError' && signal?.aborted) {
           throw e;
+        }
+        // Gate 43: record the terminal logical outcome (timeout vs failure), but ONLY
+        // for the inline text-only path. Tool-capable adapters record per-round inside
+        // runToolLoop (see there) — recording here too would double-count the same call.
+        if (!adapter.supportsTools()) {
+          await persistModelHealth(opts.modelHealth, ctx.ownerId, selection.model.provider, selection.model.id, attempt, classifyModelCallOutcome(e, false), safeNow() - healthStart, false);
         }
         // Non-fallback final candidate: surface the failure. On any earlier
         // candidate in the ranked chain, move to the next capable candidate.
@@ -353,6 +424,7 @@ export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRu
       // mechanism as execution (buildRoutingRequirements) — honors ctx.agentReasoning,
       // so plan and execute reasoning floors can never diverge.
       const req = buildRoutingRequirements(ctx, intent);
+      await loadHealthBatch(ctx.ownerId);
       const routing = router.route(models, req);
       if (routing.outcome !== 'selected') return null;
       const selection = routing.selection;
@@ -426,6 +498,7 @@ export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRu
       messages.push({ role: 'user', content: `Task: ${task.title}\nCommand: ${intent.normalized}` });
 
       let response;
+      const planStart = safeNow();
       try {
         response = await adapter.complete({
           model: selection.model.name,
@@ -434,9 +507,11 @@ export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRu
           temperature: 0,
           tools: providerTools,
         });
-      } catch {
+      } catch (e) {
+        void persistModelHealth(opts.modelHealth, ctx.ownerId, selection.model.provider, selection.model.id, 0, classifyModelCallOutcome(e, false), safeNow() - planStart, false);
         return null;
       }
+      void persistModelHealth(opts.modelHealth, ctx.ownerId, selection.model.provider, selection.model.id, 0, 'success', safeNow() - planStart, response.usage != null);
 
       if (!response.toolCalls || response.toolCalls.length === 0) return null;
 
@@ -490,6 +565,8 @@ async function runToolLoop(
   anomalyDetector?: AnomalyDetector,
   store?: Store,
   signal?: AbortSignal,
+  modelHealth?: ModelHealthPersistence,
+  fallbackIndex = 0,
 ): Promise<ExecutionOutcome> {
   const system = systemPrompt(ctx);
 
@@ -615,14 +692,24 @@ async function runToolLoop(
 
   while (round < FACTORY_MAX_TOOL_ROUNDS) {
     round++;
-    const response = await adapter.complete({
-      model: model.name,
-      messages,
-      maxTokens: 1024,
-      temperature: 0,
-      tools: providerTools,
-      signal,
-    });
+    const roundStart = safeNow();
+    let response: import('../gateways/providerAdapter.js').ProviderResponse;
+    try {
+      response = await adapter.complete({
+        model: model.name,
+        messages,
+        maxTokens: 1024,
+        temperature: 0,
+        tools: providerTools,
+        signal,
+      });
+    } catch (e) {
+      // ONE observation per round; the adapter's internal transport retries collapse
+      // into this single terminal outcome. Never blocks the request path.
+      void persistModelHealth(modelHealth, ctx.ownerId, model.provider, model.id, fallbackIndex, classifyModelCallOutcome(e, signal?.aborted ?? false), safeNow() - roundStart, false);
+      throw e;
+    }
+    void persistModelHealth(modelHealth, ctx.ownerId, model.provider, model.id, fallbackIndex, 'success', safeNow() - roundStart, response.usage != null);
 
     totalInputTokens += response.usage?.inputTokens ?? 0;
     totalOutputTokens += response.usage?.outputTokens ?? 0;

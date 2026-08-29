@@ -218,6 +218,7 @@ export async function startServer(opts?: { port?: number; host?: string }): Prom
     securityGuardian: guardian,
     rateLimiter,
     anomalyDetector,
+    modelHealth: store,
   });
   const pipeline = new CommandPipeline(store, execution, guardian, rateLimiter, anomalyDetector);
   const api = new Api(store, auth, pipeline, execution);

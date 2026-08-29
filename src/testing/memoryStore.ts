@@ -1,11 +1,12 @@
 // Test fixture — in-memory Store implementation (deterministic, no I/O).
 // Used by pipeline / isolation / audit unit tests. NOT shipped in build.
 
-import type { Store, TaskPatch, ApprovalPatch, AgentStats, AgentWorkload, BudgetReport, WorkforceControlAdminPersistence } from '../core/ports.js';
+import type { Store, TaskPatch, ApprovalPatch, AgentStats, AgentWorkload, BudgetReport, WorkforceControlAdminPersistence, ModelHealthPersistence } from '../core/ports.js';
 import type {
   AgentRecord, AgentDefinition, AgentPatch,
   ApprovalRecord, AuditEvent, AutonomyDecision, CostEvent, DailyStatus, DecisionRecord,
   JsonObject, LessonInput, MissionInput, MissionPlanCanonical, MissionRecord, ModelInfo,
+  ModelHealthObservation, ModelHealthSnapshot,
   PassportRecord, ProjectRecord, RecallItem, RuntimeInfo, TaskDependencyRecord, TaskRecord,
   TaskRunRecord,
 } from '../core/types.js';
@@ -18,11 +19,12 @@ import { toIncidentRecord, applyIncidentPatch } from '../core/security/incidents
 import { toLockdownRecord, canReleaseLockdown } from '../core/security/lockdown.js';
 import type { WorkforceControlRecord } from '../core/security/workforceControl.js';
 import { missionCanTransition, hashMissionPlan } from '../core/mission/missionEngine.js';
+import { aggregateModelHealth, DEFAULT_HEALTH_POLICY } from '../core/modelHealth.js';
 
 const uuid = (): string => crypto.randomUUID();
 const now = (): string => new Date().toISOString();
 
-export class MemoryStore implements Store, WorkforceControlAdminPersistence {
+export class MemoryStore implements Store, WorkforceControlAdminPersistence, ModelHealthPersistence {
   projects: ProjectRecord[] = [];
   passports: PassportRecord[] = [];
   tasks: TaskRecord[] = [];
@@ -31,6 +33,7 @@ export class MemoryStore implements Store, WorkforceControlAdminPersistence {
   approvals: ApprovalRecord[] = [];
   audit: AuditEvent[] = [];
   costs: CostEvent[] = [];
+  modelHealth: ModelHealthObservation[] = [];
   prefs: { category: string; key: string; value: unknown; version: number; isActive: boolean }[] = [];
   decisions: DecisionRecord[] = [];
   autonomy: AutonomyDecision[] = [];
@@ -492,6 +495,28 @@ export class MemoryStore implements Store, WorkforceControlAdminPersistence {
   }
   async recordCost(event: CostEvent): Promise<void> {
     this.costs.push(event);
+  }
+  async recordModelHealthObservation(observation: ModelHealthObservation): Promise<void> {
+    this.modelHealth.push({ ...observation, observedAt: observation.observedAt ?? now() });
+  }
+  async getModelHealthSnapshots(
+    ownerId: string,
+    filter?: { provider?: string; modelId?: string },
+  ): Promise<ModelHealthSnapshot[]> {
+    const grouped = new Map<string, ModelHealthObservation[]>();
+    for (const o of this.modelHealth) {
+      if (o.ownerId !== ownerId) continue;
+      if (filter?.provider && o.provider !== filter.provider) continue;
+      if (filter?.modelId && o.modelId !== filter.modelId) continue;
+      const key = `${o.provider}::${o.modelId}`;
+      const arr = grouped.get(key);
+      if (arr) arr.push(o);
+      else grouped.set(key, [o]);
+    }
+    return [...grouped.entries()].map(([key, obs]) => {
+      const [provider, modelId] = key.split('::');
+      return aggregateModelHealth(obs, DEFAULT_HEALTH_POLICY, provider!, modelId!);
+    });
   }
   async totalCost(ownerId: string, projectId?: string | null): Promise<number> {
     return this.costs.filter((c) => c.ownerId === ownerId && (!projectId || c.projectId === projectId)).reduce((s, c) => s + c.amount, 0);

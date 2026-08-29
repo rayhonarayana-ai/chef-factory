@@ -235,6 +235,9 @@ export function specialistRoutingRequirements(
     neededCodingStrength: needs.codingStrength,
     neededMultimodal: needs.multimodal,
     neededStructuredOutput: needs.structuredOutput,
+    // Gate 43: propagate the specialist's provider-neutral latency sensitivity so the
+    // canonical router can use latency bucket as an explicit ranking dimension.
+    latencySensitive: needs.latencySensitive,
   };
 }
 

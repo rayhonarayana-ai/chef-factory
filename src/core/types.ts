@@ -395,6 +395,10 @@ export interface ModelRoutingRequirements {
   neededCodingStrength?: 'none' | 'low' | 'medium' | 'high' | null;
   neededMultimodal?: boolean | null;
   neededStructuredOutput?: boolean | null;
+  /** Gate 43: when true, latency bucket is an explicit ranking dimension among
+   *  capable/eligible candidates (never stronger than a capability floor and
+   *  never cost-granting for ordinary work). False => cost-first behavior. */
+  latencySensitive?: boolean | null;
 }
 
 export interface ModelSelection {
@@ -416,11 +420,107 @@ export interface RoutingBudget {
 /**
  * Provider health signal for routing. A candidate whose provider path is
  * unavailable/open-circuit may be excluded or deprioritized deterministically.
+ * Gate 43 adds optional provider-neutral health detail so the router can rank
+ * by latency bucket and degrade by deterministic thresholds (never an opaque
+ * score, never authority-granting).
  */
 export interface ProviderHealthSignal {
   provider: string;
-  available: boolean; // false => exclude (open circuit / down)
+  /** Gate 43: the specific registered model being signaled (per-model telemetry). */
+  modelId?: string;
+  /** false => exclude (open circuit / explicitly unavailable). */
+  available: boolean;
+  /** Gate 43: deterministic availability class (cold start = 'unknown' => neutral). */
+  availability?: ModelAvailability;
+  /** Gate 43: provider-neutral latency bucket (deterministic ranking dimension). */
+  latencyBucket?: LatencyBucket;
+  /** Gate 43: number of completed logical observations behind this signal. */
+  observationCount?: number;
+  /** Gate 43: provider-wide circuit state (truthfully provider-scoped). */
+  circuitState?: ModelCircuitState;
+  /** Gate 43: deterministic recent failure ratio (0..1 or null when insufficient). */
+  recentFailureRatio?: number | null;
+  /** Gate 43: deterministic recent timeout ratio (0..1 or null when insufficient). */
+  recentTimeoutRatio?: number | null;
 }
+
+// ---------- Gate 43 — Durable Model/Provider Health Telemetry ----------
+
+/** Outcome class of ONE completed logical model observation. */
+export type ModelHealthOutcome = 'success' | 'failure' | 'timeout';
+
+/** Provider-neutral availability class. 'unknown' = cold-start/no telemetry = NEUTRAL. */
+export type ModelAvailability = 'unknown' | 'available' | 'degraded' | 'unavailable';
+
+/** Provider-neutral latency bucket (deterministic, no provider-specific thresholds). */
+export type LatencyBucket = 'unknown' | 'low' | 'medium' | 'high';
+
+/** Provider-wide circuit state (preserved from the existing resilient breaker). */
+export type ModelCircuitState = 'unknown' | 'closed' | 'open' | 'half_open';
+
+/**
+ * Gate 43 — A single durable health OBSERVATION (system-observed execution fact).
+ * This is NOT prompt/API-key/payload data; only provider-neutral routing signals.
+ * Transport-retry attempts within ONE logical adapter.complete() are collapsed
+ * into exactly ONE observation (see WHAT_COUNTS_AS_ONE_OBSERVATION).
+ */
+export interface ModelHealthObservation {
+  ownerId: string;
+  provider: string;
+  modelId: string;
+  /** Provider-neutral outcome of the logical call. */
+  outcome: ModelHealthOutcome;
+  /** Monotonic wall duration of the logical call (>= 0 ms). */
+  latencyMs: number;
+  /** Whether the provider reported token usage on success (Google = false). */
+  usageObserved: boolean;
+  /** Candidate index within the routing chain (0 = primary, 1..n = fallback). */
+  fallbackIndex: number;
+  /** RFC3339 observed-at (defaulted to now if omitted). */
+  observedAt?: string | null;
+}
+
+/**
+ * Gate 43 — Provider-neutral aggregated health snapshot over the bounded recent
+ * window. Deterministic; computed from bounded canonical observations. Never an
+ * opaque score; every field is an explicit explainable signal.
+ */
+export interface ModelHealthSnapshot {
+  provider: string;
+  modelId?: string;
+  observationCount: number;
+  recentSuccessCount: number;
+  recentFailureCount: number;
+  recentTimeoutCount: number;
+  recentFailureRatio: number | null;
+  recentTimeoutRatio: number | null;
+  latencyBucket: LatencyBucket;
+  circuitState: ModelCircuitState;
+  availability: ModelAvailability;
+  lastSuccessAt?: string | null;
+  lastFailureAt?: string | null;
+  updatedAt?: string | null;
+}
+
+/** Gate 43 — Provider-neutral health policy constants (see src/core/modelHealth.ts). */
+export interface ModelHealthPolicy {
+  /** Bounded deterministic recent window (number of latest observations). */
+  recentWindow: number;
+  /** Minimum observations before the availability classification has confidence. */
+  minObservations: number;
+  /** recentFailureRatio >= this => 'degraded'. */
+  failureDegradeRatio: number;
+  /** recentTimeoutRatio >= this => 'degraded'. */
+  timeoutDegradeRatio: number;
+  /** Provider-neutral latency bucket boundaries (ms). Representative (median)
+   *  latency < latencyLowMs => 'low'; < latencyMediumMs => 'medium'; <
+   *  latencyHighMs => 'high'; else 'high'. Provider-agnostic, documented. */
+  latencyLowMs: number;
+  latencyMediumMs: number;
+  latencyHighMs: number;
+}
+
+
 
 /** Deterministic, safe routing rationale. Never contains secrets or prompts. */
 export interface SafeRoutingRationale {
@@ -434,6 +534,10 @@ export interface SafeRoutingRationale {
   estimatedCost: number | null;
   fallbackIndex: number;
   rejectionReason: RoutingRejection | null;
+  /** Gate 43 — provider-neutral explainability for adaptive routing. Optional. */
+  selectedAvailability?: ModelAvailability | null;
+  selectedLatencyBucket?: LatencyBucket | null;
+  selectedObservationCount?: number | null;
 }
 
 export type RoutingRejection =

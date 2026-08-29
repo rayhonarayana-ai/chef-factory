@@ -15,6 +15,8 @@ import type {
   DecisionRecord,
   JsonObject,
   LessonInput,
+  ModelHealthObservation,
+  ModelHealthSnapshot,
   ModelInfo,
   MissionActivateResult,
   MissionInput,
@@ -353,6 +355,18 @@ export interface Store {
   listModels(ownerId: string): Promise<ModelInfo[]>;
   listRuntimes(ownerId: string): Promise<RuntimeInfo[]>;
 
+  // ————— Gate 43 — Durable model/provider health telemetry (READ on the general Store) —————
+  // The general runtime Store surface exposes the READ side of durable health ONLY
+  // so the router chain can consume a shared, restart-safe health snapshot. WRITE
+  // is deliberately NOT on this interface: it is a trusted system-observed capability
+  // (ModelHealthPersistence) reachable only from the trusted model-execution collector,
+  // never by agents/models/the router (AGENT_CAN_WRITE_HEALTH_TELEMETRY = NO,
+  // MODEL_CAN_WRITE_HEALTH_TELEMETRY = NO, ROUTER_CAN_WRITE_HEALTH_TELEMETRY = NO).
+  getModelHealthSnapshots(
+    ownerId: string,
+    filter?: { provider?: string; modelId?: string },
+  ): Promise<ModelHealthSnapshot[]>;
+
   // monitoring
   dailyStatus(ownerId: string): Promise<DailyStatus>;
 
@@ -412,6 +426,25 @@ export interface Store {
   //   - task.status === 'queued' (eligible)
   // Uses FOR UPDATE + conditional WHERE to prevent concurrent claims.
   claimTaskForExecution(ownerId: string, taskId: string, agentId: string): Promise<ClaimTaskResult>;
+}
+
+// ————— Gate 43 — Trusted Model/Provider Health telemetry WRITE persistence —————
+// This is a SEPARATE narrow capability interface, deliberately NOT part of the general
+// `Store`. It is implemented by the persistent repository and the in-memory test fake,
+// but it is wired/typed ONLY into the trusted model-execution collector (the execution
+// runner). Normal Worker/Agent/Model/Router/Tool code receives `Store` (health READ only)
+// and therefore cannot reach the raw write. There is NO generic public telemetry mutation
+// tool and nothing is exposed through ToolBroker to agents.
+//
+//   AGENT_CAN_WRITE_HEALTH_TELEMETRY = NO
+//   MODEL_CAN_WRITE_HEALTH_TELEMETRY = NO
+//   ROUTER_CAN_WRITE_HEALTH_TELEMETRY = NO
+//
+// The raw primitive carries NO actor identity: authorization is implicit in the fact that
+// only trusted execution/resilience infrastructure invokes it. Observations are
+// SYSTEM-OBSERVED EXECUTION FACTS (provider-neutral, no secrets, no prompts).
+export interface ModelHealthPersistence {
+  recordModelHealthObservation(observation: ModelHealthObservation): Promise<void>;
 }
 
 // ————— Gate 41 — Privileged Global Workforce Control WRITE persistence —————

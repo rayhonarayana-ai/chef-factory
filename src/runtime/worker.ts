@@ -73,7 +73,7 @@ async function buildRuntime(): Promise<WorkerRuntime> {
   const rateLimiter = new PersistentRateLimiter(undefined, undefined, createRateLimitPersistence(pool));
   const anomalyDetector = new PersistentAnomalyDetector(undefined, undefined, createAnomalyPersistence(pool));
   const guardian = createSecurityGuardian(store, rateLimiter, anomalyDetector);
-  const execution = createExecutionRunner({ store, modelGateway, runtimeGateway, securityGuardian: guardian, rateLimiter, anomalyDetector });
+  const execution = createExecutionRunner({ store, modelGateway, runtimeGateway, securityGuardian: guardian, rateLimiter, anomalyDetector, modelHealth: store });
 
   const worker = new WorkforceWorker({ store, execution, config: envConfig });
   const controller = new AbortController();

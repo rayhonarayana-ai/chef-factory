@@ -61,6 +61,10 @@ export interface ActorContext {
    *  profile's modelNeeds, feeding the existing ModelGateway selection. When
    *  absent, reasoning is derived from the client intent as before. */
   agentReasoning?: 'none' | 'low' | 'medium' | 'high' | null;
+  /** Gate 43: optional provider-neutral latency sensitivity from the specialist
+   *  profile's modelNeeds. When present, execution/planning derive the routing
+   *  requirements' latencySensitive dimension from it (SUITABILITY only). */
+  agentLatencySensitive?: boolean | null;
 }
 
 export interface ExecutionOutcome {

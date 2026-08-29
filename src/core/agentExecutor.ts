@@ -258,6 +258,9 @@ export async function executeAssignedAgentTask(
     // NEVER grants authority; NEVER references a model provider.
     agentSystemPrompt: buildSpecialistSystemPrompt(agentId, ownerId, task.id, specialistProfile),
     agentReasoning: specialistProfile?.modelNeeds.reasoning ?? null,
+    // Gate 43: propagate the specialist's provider-neutral latency sensitivity so
+    // the canonical routing requirements can treat latencySensitive operationally.
+    agentLatencySensitive: specialistProfile?.modelNeeds.latencySensitive ?? null,
   };
 
   // 9. Build Synthetic Intent

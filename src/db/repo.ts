@@ -14,6 +14,8 @@ import type {
   DecisionRecord,
   JsonObject,
   LessonInput,
+  ModelHealthObservation,
+  ModelHealthSnapshot,
   ModelInfo,
   MissionActivateResult,
   MissionInput,
@@ -28,7 +30,8 @@ import type {
   TaskRecord,
   TaskRunRecord,
 } from '../core/types.js';
-import type { AgentStats, AgentWorkload, BudgetReport, Store, WorkforceControlAdminPersistence } from '../core/ports.js';
+import type { AgentStats, AgentWorkload, BudgetReport, Store, WorkforceControlAdminPersistence, ModelHealthPersistence } from '../core/ports.js';
+import { aggregateModelHealth, DEFAULT_HEALTH_POLICY } from '../core/modelHealth.js';
 import type { WorkforceControlRecord } from '../core/security/workforceControl.js';
 import { emptyPassport } from '../core/passport.js';
 import { hashMissionPlan } from '../core/mission/missionEngine.js';
@@ -56,7 +59,7 @@ function toCamel(row: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
-export class SupabaseStore implements Store, WorkforceControlAdminPersistence {
+export class SupabaseStore implements Store, WorkforceControlAdminPersistence, ModelHealthPersistence {
   constructor(private readonly pool = getPool()) {}
 
   private async q<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
@@ -1195,6 +1198,94 @@ export class SupabaseStore implements Store, WorkforceControlAdminPersistence {
       projectId ? [ownerId, projectId] : [ownerId],
     );
     return Number(rows[0]?.sum ?? 0);
+  }
+
+  // ————— Gate 43 — Durable model/provider health telemetry —————
+  // Write is SYSTEM-OBSERVED (narrow ModelHealthPersistence port). Read is the
+  // Store surface. Both are owner-scoped + RLS-protected (owner SELECT only, no
+  // client INSERT/UPDATE/DELETE). Bounded: prune keeps per-(owner,provider,model)
+  // growth capped at a few multiples of the recent window (no raw telemetry lake).
+
+  async recordModelHealthObservation(observation: ModelHealthObservation): Promise<void> {
+    await this.q(
+      `insert into public.model_health_observations (
+         owner_id, provider, model_id, outcome, latency_ms, usage_observed, fallback_index, observed_at
+       ) values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [
+        observation.ownerId, observation.provider, observation.modelId,
+        observation.outcome, observation.latencyMs, observation.usageObserved,
+        observation.fallbackIndex, observation.observedAt ?? new Date().toISOString(),
+      ],
+    );
+    // Bounded growth: retain only a small multiple of the recent window per key.
+    const keepPerKey = DEFAULT_HEALTH_POLICY.recentWindow * 2;
+    await this.q(
+      `delete from public.model_health_observations
+       where id in (
+         select id from (
+           select id,
+                  row_number() over (partition by owner_id, provider, model_id order by observed_at desc) as rn
+           from public.model_health_observations
+           where owner_id = $1
+         ) ranked
+         where ranked.rn > $2
+       )`,
+      [observation.ownerId, keepPerKey],
+    );
+  }
+
+  async getModelHealthSnapshots(
+    ownerId: string,
+    filter?: { provider?: string; modelId?: string },
+  ): Promise<ModelHealthSnapshot[]> {
+    const conditions = ['owner_id = $1'];
+    const params: unknown[] = [ownerId];
+    if (filter?.provider) {
+      params.push(filter.provider);
+      conditions.push(`provider = $${params.length}`);
+    }
+    if (filter?.modelId) {
+      params.push(filter.modelId);
+      conditions.push(`model_id = $${params.length}`);
+    }
+    params.push(DEFAULT_HEALTH_POLICY.recentWindow);
+    const where = conditions.join(' and ');
+    const rows = await this.q<Record<string, unknown>>(
+      `select provider, model_id, outcome, latency_ms, usage_observed, fallback_index, observed_at
+       from (
+         select provider, model_id, outcome, latency_ms, usage_observed, fallback_index, observed_at,
+                row_number() over (partition by provider, model_id order by observed_at desc) as rn
+         from public.model_health_observations
+         where ${where}
+       ) ranked
+       where ranked.rn <= $${params.length}
+       order by ranked.provider asc, ranked.model_id asc, ranked.observed_at desc`,
+      params,
+    );
+    const grouped = new Map<string, ModelHealthObservation[]>();
+    for (const r of rows) {
+      // `this.q` maps rows through toCamel, so fields are camelCase (model_id -> modelId).
+      const provider = String(r.provider ?? '');
+      const modelId = String(r.modelId ?? '');
+      const key = `${provider}::${modelId}`;
+      const obs: ModelHealthObservation = {
+        ownerId,
+        provider,
+        modelId,
+        outcome: r.outcome === 'timeout' ? 'timeout' : r.outcome === 'failure' ? 'failure' : 'success',
+        latencyMs: Number(r.latencyMs ?? 0),
+        usageObserved: Boolean(r.usageObserved),
+        fallbackIndex: Number(r.fallbackIndex ?? 0),
+        observedAt: r.observedAt ? String(r.observedAt) : null,
+      };
+      const arr = grouped.get(key);
+      if (arr) arr.push(obs);
+      else grouped.set(key, [obs]);
+    }
+    return [...grouped.entries()].map(([key, obs]) => {
+      const [provider, modelId] = key.split('::');
+      return aggregateModelHealth(obs, DEFAULT_HEALTH_POLICY, provider!, modelId!);
+    });
   }
 
   async projectBudget(ownerId: string, projectId: string): Promise<BudgetReport> {
