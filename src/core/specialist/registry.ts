@@ -13,7 +13,7 @@
 //   MATERIALIZE_USES_EXISTING_CREATEAGENT = YES
 
 import type { Store } from '../ports.js';
-import type { ModelSelectionRequest } from '../types.js';
+import type { ModelRoutingRequirements, ModelSelectionRequest } from '../types.js';
 import type { SpecialistProfile } from './types.js';
 
 /**
@@ -211,6 +211,30 @@ export function specialistModelSelectionRequest(profile: SpecialistProfile): Mod
     neededReasoning: profile.modelNeeds.reasoning,
     neededTools: profile.modelNeeds.tools,
     minContextWindow: profile.modelNeeds.minContextWindow,
+  };
+}
+
+/**
+ * Gate 42 — Provider-neutral mapping of ALL of a specialist's modelNeeds into the
+ * canonical ModelRouter's enriched routing requirements. Every field the registry
+ * can evaluate is carried so it can act as a mandatory suitability floor.
+ * NEVER names a provider/model. NEVER grants authority — it is SUITABILITY only.
+ */
+export function specialistRoutingRequirements(
+  profile: SpecialistProfile,
+  intentRequirement = 'general',
+): ModelRoutingRequirements {
+  const needs = profile.modelNeeds;
+  return {
+    requirement: intentRequirement,
+    neededReasoning: needs.reasoning,
+    neededTools: needs.tools,
+    minContextWindow: needs.minContextWindow,
+    mandatory: true,
+    maxCostPerCall: null,
+    neededCodingStrength: needs.codingStrength,
+    neededMultimodal: needs.multimodal,
+    neededStructuredOutput: needs.structuredOutput,
   };
 }
 

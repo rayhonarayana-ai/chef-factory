@@ -52,7 +52,7 @@ describe('ModelGateway (model-agnostic selection)', () => {
   it('returns no model (nothing invented) when nothing fits', () => {
     const s = gw.select(MODELS, { requirement: 'x', neededReasoning: 'high', neededTools: true, minContextWindow: 9000000 });
     expect(s.model).toBeNull();
-    expect(s.reason).toContain('No active model');
+    expect(s.reason).toContain('No registered model satisfies');
   });
 
   it('honors context window requirements', () => {

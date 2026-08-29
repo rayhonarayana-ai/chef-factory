@@ -1,22 +1,54 @@
-// CHEF FACTORY — Gate 1 — ModelGateway.
-// Model-agnostic selection: capability, reasoning, cost, policy.
-// Uses the cheapest capable model; frontier reasoning only when justified.
-// Provider choice is never part of business logic.
+// CHEF FACTORY — Gate 1 → Gate 42 — ModelGateway.
+// Execution gateway: it now EXECUTES the already-selected provider/model and
+// preserves the provider-neutral execution abstraction. Selection policy is the
+// SOLE responsibility of the canonical ModelRouter (src/core/modelRouter.ts) —
+// the gateway delegates to it and must NOT duplicate the selection algorithm.
+//
+// Compatibility: select() is retained as a thin delegating wrapper so existing
+// call sites and tests keep working while the ONE canonical routing algorithm
+// lives in ModelRouter.
+//
+// INVARIANTS:
+//   CANONICAL_ROUTING_ALGORITHM_LOCATION = src/core/modelRouter.ts
+//   QUALITY_FLOOR_BEFORE_COST = TRUE
+//   ROUTER_LLM_CALLS = 0
+//   ROUTING_NETWORK_CALLS_BASELINE = 0
+//   MODEL_SELECTION_GRANTS_AUTHORITY = NO
 
 import type { ModelInfo, ModelSelection, ModelSelectionRequest } from '../core/types.js';
+import { ModelRouter, type RouterHealthSource, type RouterRuntime } from '../core/modelRouter.js';
 import type { ProviderAdapter } from './providerAdapter.js';
-
-const REASONING_RANK: Record<string, number> = { none: 0, low: 1, medium: 2, high: 3 };
+import type { ResilientAdapter } from './resilience.js';
 
 export interface ModelGatewayConfig {
   preferCheapest?: boolean;
 }
 
 export class ModelGateway {
+  private readonly router: ModelRouter;
+
   constructor(
     private readonly adapters: Map<string, ProviderAdapter>,
     private readonly config: ModelGatewayConfig = { preferCheapest: true },
-  ) {}
+    routerOrRuntime?: ModelRouter | RouterRuntime,
+  ) {
+    // Health awareness: surfaced from the adapters map if available (resilient
+    // adapters expose getHealth()); cold-start/no-health-data => available.
+    const health: RouterHealthSource = {
+      signal: (provider: string): { provider: string; available: boolean } => {
+        const a = this.adapters.get(provider);
+        if (a && typeof (a as ResilientAdapter).getHealth === 'function') {
+          const h = (a as ResilientAdapter).getHealth();
+          return { provider, available: h.circuitState !== 'open' };
+        }
+        return { provider, available: true };
+      },
+    };
+    this.router =
+      routerOrRuntime instanceof ModelRouter
+        ? routerOrRuntime
+        : new ModelRouter(routerOrRuntime === undefined ? undefined : { ...routerOrRuntime, health });
+  }
 
   providers(): string[] {
     return [...this.adapters.keys()];
@@ -26,50 +58,27 @@ export class ModelGateway {
     return this.adapters.get(provider) ?? null;
   }
 
-  // Deterministic selection — cheapest capable model first.
-  select(models: ModelInfo[], request: ModelSelectionRequest): ModelSelection {
-    const active = models.filter((m) => m.status === 'active');
-    const needed = REASONING_RANK[request.neededReasoning] ?? 0;
-
-    const candidates = active
-      .filter((m) => {
-        const cap = m.capability as { reasoning?: string; tools?: boolean };
-        const reasoning = REASONING_RANK[cap.reasoning ?? 'none'] ?? 0;
-        if (reasoning < needed) return false;
-        if (request.neededTools && cap.tools !== true) return false;
-        if (request.minContextWindow !== null && request.minContextWindow !== undefined) {
-          if (m.contextWindow === null || m.contextWindow < request.minContextWindow) return false;
-        }
-        return true;
-      })
-      .sort((a, b) => {
-        const ca = a.costPer1kInput + a.costPer1kOutput;
-        const cb = b.costPer1kInput + b.costPer1kOutput;
-        if (ca !== cb) return ca - cb;
-        return a.name.localeCompare(b.name);
-      });
-
-    if (candidates.length === 0) {
-      return {
-        model: null,
-        reason: `No active model satisfies requirements (reasoning>=${request.neededReasoning}, tools=${request.neededTools}). Nothing was invented.`,
-        cheapestCapable: false,
-        candidates: [],
-      };
+  /** Router-level health source (used by execution fallback). */
+  healthFor(provider: string): { provider: string; available: boolean } {
+    const a = this.adapters.get(provider);
+    if (a && typeof (a as ResilientAdapter).getHealth === 'function') {
+      const h = (a as ResilientAdapter).getHealth();
+      return { provider, available: h.circuitState !== 'open' };
     }
+    return { provider, available: true };
+  }
 
-    const selected = this.config.preferCheapest ? candidates[0]! : candidates[candidates.length - 1]!;
-    const isFrontierOnly = candidates.every(
-      (c) => (c.capability as { reasoning?: string }).reasoning === 'high',
-    );
-
-    return {
-      model: selected,
-      reason: isFrontierOnly
-        ? `Only frontier-reasoning models satisfy the requirement; using cheapest capable: ${selected.provider}/${selected.name}.`
-        : `Cheapest capable model selected: ${selected.provider}/${selected.name}.`,
-      cheapestCapable: selected.id === candidates[0]!.id,
-      candidates,
-    };
+  // Compatibility wrapper — delegates to the canonical ModelRouter. No selection
+  // policy logic lives here.
+  select(models: ModelInfo[], request: ModelSelectionRequest): ModelSelection {
+    const result = this.router.route(models, {
+      requirement: request.requirement,
+      neededReasoning: request.neededReasoning,
+      neededTools: request.neededTools,
+      minContextWindow: request.minContextWindow,
+      mandatory: false,
+      maxCostPerCall: null,
+    });
+    return result.selection;
   }
 }

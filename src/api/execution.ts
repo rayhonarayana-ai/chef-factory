@@ -7,8 +7,13 @@
 
 import type { Store } from '../core/ports.js';
 import type { ActorContext, ConversationMessage, ExecutionOutcome, ExecutionRunner, PlanStepsResult } from '../core/pipeline.js';
-import type { ParsedIntent, TaskRecord } from '../core/types.js';
+import type { ParsedIntent, TaskRecord, ModelInfo } from '../core/types.js';
 import { evaluateAuthority, riskFromAction } from '../core/authority.js';
+import {
+  ModelRouter,
+  type RouterHealthSource,
+} from '../core/modelRouter.js';
+import type { ModelRoutingRequirements, ModelRoutingResult } from '../core/types.js';
 import { ModelGateway } from '../gateways/modelGateway.js';
 import { RuntimeGateway } from '../gateways/runtimeGateway.js';
 import { costForTokens, estimateTokens, type ProviderAdapter } from '../gateways/providerAdapter.js';
@@ -95,6 +100,9 @@ export interface ExecutionRunnerOptions {
   securityGuardian?: SecurityGuardian;
   rateLimiter?: RateLimiter;
   anomalyDetector?: AnomalyDetector;
+  /** Gate 42: canonical provider-neutral router. Defaults to an unconfigured
+   *  ModelRouter (no health/budget) when omitted. MUST NOT be an authority. */
+  router?: ModelRouter;
 }
 
 const INFO_VERBS = new Set(['ask', 'status', 'list', 'read', 'plan', 'research']);
@@ -113,9 +121,37 @@ export function computeNeededReasoning(intent: ParsedIntent): 'none' | 'low' | '
   }
 }
 
+/**
+ * Gate 42 — SINGLE canonical mechanism to build routing requirements for a task.
+ * Both executeInner and planSteps derive requirements through this helper, so
+ * their reasoning floors can never diverge (execution/planning parity). Honors
+ * the actor's provider-neutral specialist reasoning need (ctx.agentReasoning)
+ * when present; otherwise derives from the intent. Never names a provider/model.
+ */
+export function buildRoutingRequirements(
+  ctx: Pick<ActorContext, 'agentReasoning'>,
+  intent: ParsedIntent,
+): ModelRoutingRequirements {
+  return {
+    requirement: intent.resource ?? 'general',
+    neededReasoning: ctx.agentReasoning ?? computeNeededReasoning(intent),
+    neededTools: true,
+    minContextWindow: null,
+    mandatory: true,
+    maxCostPerCall: null,
+  };
+}
+
 export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRunner {
   const secrets = opts.secretProvider ?? createEnvSecretProvider();
   const toolDefs = GATE3_TOOLS;
+  // Gate 42: canonical provider-neutral router. When not injected, build one whose
+  // health source derives from the adapters surfaced by the ModelGateway (open
+  // circuits deprioritize/exclude a provider deterministically; cold-start => available).
+  const healthSource: RouterHealthSource = {
+    signal: (provider) => opts.modelGateway.healthFor(provider),
+  };
+  const router = opts.router ?? new ModelRouter({ preferCheapest: true, health: healthSource });
 
   // Gate 22: inner execution logic with AbortSignal propagation.
   async function executeInner(
@@ -130,73 +166,124 @@ export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRu
       return runInformational(opts.store, ctx.ownerId, intent);
     }
 
-    // Execute-class: try ModelGateway first, then RuntimeGateway.
+    // Execute-class: try ModelRouter → ModelGateway first, then RuntimeGateway.
+    // Gate 42: routing REQUIRirements come from ONE canonical helper for both
+    // execute and plan (parity), honoring the actor's provider-neutral reasoning
+    // need when present. The router is a COMPUTE SUITABILITY component — it never
+    // grants authority or bypasses security/budget.
     const models = await opts.store.listModels(ctx.ownerId);
-    // Gate 40: agent actors may declare a provider-neutral reasoning need via
-    // their specialist profile's modelNeeds. Prefer it when present; otherwise
-    // derive from the client intent.
-    const neededReasoning = ctx.agentReasoning ?? computeNeededReasoning(intent);
-    const selection = opts.modelGateway.select(models, {
-      requirement: intent.resource ?? 'general',
-      neededReasoning,
-      neededTools: true,
-      minContextWindow: null,
-    });
+    const req = buildRoutingRequirements(ctx, intent);
+    let routing: ModelRoutingResult = router.route(models, req);
 
-    if (selection.model) {
-      const adapter: ProviderAdapter | null = opts.modelGateway.adapterFor(selection.model.provider);
-      if (adapter && adapter.configured()) {
-        try {
-          // Gate 3: tool calling loop
-          if (adapter.supportsTools()) {
-            return await runToolLoop(adapter, selection.model, toolDefs, task, ctx, intent, secrets, opts.toolDb, conversationHistory, opts.securityGuardian, opts.rateLimiter, opts.anomalyDetector, opts.store, signal);
-          }
-          // G5-02: Fallback: text-only — must still pass through rate limit check
-          if (opts.rateLimiter) {
-            const modelLimit = opts.rateLimiter.check(ctx.ownerId, 'model' as SecurityScopeKey, 'model.call');
-            if (!modelLimit.allowed) {
-              return {
-                ok: false,
-                error: `Rate limit exceeded: model.call (${modelLimit.limit} per ${Math.round(modelLimit.windowMs / 1000)}s). Retry later.`,
-                reason: 'rate-limit-exceeded',
-              };
-            }
-          }
-          const historyText = conversationHistory && conversationHistory.length > 0
-            ? truncateConversationHistory(conversationHistory).map((m) => `[${m.role}]: ${m.content}`).join('\n') + '\n'
-            : '';
-          const response = await adapter.complete({
-            model: selection.model.name,
-            system: systemPrompt(ctx),
-            messages: [
-              ...(historyText ? [{ role: 'user' as const, content: historyText }] : []),
-              { role: 'user', content: `Task: ${task.title}\nCommand context: ${intent.normalized}` },
-            ],
-            maxTokens: 1024,
-            temperature: 0,
+    if (routing.outcome !== 'selected') {
+      const runtimes = await opts.store.listRuntimes(ctx.ownerId);
+      const runtimeSel = opts.runtimeGateway.select(runtimes, intent.resource ?? 'general');
+      if (runtimeSel.runtime) {
+        const rAdapter = opts.runtimeGateway.adapterFor(runtimeSel.runtime.slug);
+        if (rAdapter?.available()) {
+          const rResult = await rAdapter.execute({
+            runtime: runtimeSel.runtime,
+            command: task.title,
+            projectPath: null,
+            environment: intent.environment ?? 'development',
             signal,
           });
-          const inputTokens = response.usage?.inputTokens ?? estimateTokens(systemPrompt(ctx) + task.title);
-          const outputTokens = response.usage?.outputTokens ?? estimateTokens(response.text);
-          const cost = costForTokens(
-            selection.model.costPer1kInput,
-            selection.model.costPer1kOutput,
-            inputTokens,
-            outputTokens,
-          );
           return {
-            ok: true,
-            output: { text: response.text, model: `${selection.model.provider}/${selection.model.name}`, usage: response.usage },
-            modelId: selection.model.id,
-            cost,
+            ok: rResult.ok,
+            output: rResult.output || null,
+            error: rResult.error ?? undefined,
+            runtimeId: runtimeSel.runtime.id,
+            cost: rResult.estimatedCost,
+            reason: rResult.ok ? undefined : 'runtime-failed',
           };
-        } catch (e) {
-          // Gate 22: re-throw abort errors so outer execute() can detect timeout.
-          if (e instanceof DOMException && e.name === 'AbortError' && signal?.aborted) {
-            throw e;
+        }
+      }
+      return {
+        ok: false,
+        error:
+          'No configured model provider or runtime adapter is available for execution. Nothing was invented and no credits were spent.',
+        reason: 'no-executor',
+      };
+    }
+
+    // Gate 42: bounded router-level fallback across ranked CAPABLE candidates.
+    // Fallback NEVER re-routes with weaker requirements — every candidate
+    // already satisfied the mandatory quality floor. Adapter resilience (bounded
+    // transient retries) remains responsible within each candidate.
+    const { selection: primarySelection } = routing as { selection: { candidates: Array<{ id: string }> } };
+    const ranked = primarySelection.candidates as ModelInfo[];
+    const unavailable = new Set<string>();
+    const routerLevelFallbackBound = 3; // primary + 2 fallbacks (bounded; mirrors retry architecture)
+
+    for (let attempt = 0; attempt < Math.min(ranked.length, routerLevelFallbackBound); attempt++) {
+      const candidate = ranked[attempt]!;
+      const isFallback = attempt > 0;
+      if (isFallback) {
+        routing = router.fallback(routing, unavailable);
+        if (routing.outcome !== 'selected') break;
+      }
+      const selection = (routing as { selection: { model: ModelInfo } }).selection;
+      const adapter: ProviderAdapter | null = opts.modelGateway.adapterFor(selection.model.provider);
+      if (!adapter || !adapter.configured()) {
+        unavailable.add(selection.model.id);
+        continue;
+      }
+      try {
+        // Gate 3: tool calling loop
+        if (adapter.supportsTools()) {
+          return await runToolLoop(adapter, selection.model, toolDefs, task, ctx, intent, secrets, opts.toolDb, conversationHistory, opts.securityGuardian, opts.rateLimiter, opts.anomalyDetector, opts.store, signal);
+        }
+        // G5-02: Fallback: text-only — must still pass through rate limit check
+        if (opts.rateLimiter) {
+          const modelLimit = opts.rateLimiter.check(ctx.ownerId, 'model' as SecurityScopeKey, 'model.call');
+          if (!modelLimit.allowed) {
+            return {
+              ok: false,
+              error: `Rate limit exceeded: model.call (${modelLimit.limit} per ${Math.round(modelLimit.windowMs / 1000)}s). Retry later.`,
+              reason: 'rate-limit-exceeded',
+            };
           }
+        }
+        const historyText = conversationHistory && conversationHistory.length > 0
+          ? truncateConversationHistory(conversationHistory).map((m) => `[${m.role}]: ${m.content}`).join('\n') + '\n'
+          : '';
+        const response = await adapter.complete({
+          model: selection.model.name,
+          system: systemPrompt(ctx),
+          messages: [
+            ...(historyText ? [{ role: 'user' as const, content: historyText }] : []),
+            { role: 'user', content: `Task: ${task.title}\nCommand context: ${intent.normalized}` },
+          ],
+          maxTokens: 1024,
+          temperature: 0,
+          signal,
+        });
+        const inputTokens = response.usage?.inputTokens ?? estimateTokens(systemPrompt(ctx) + task.title);
+        const outputTokens = response.usage?.outputTokens ?? estimateTokens(response.text);
+        const cost = costForTokens(
+          selection.model.costPer1kInput,
+          selection.model.costPer1kOutput,
+          inputTokens,
+          outputTokens,
+        );
+        return {
+          ok: true,
+          output: { text: response.text, model: `${selection.model.provider}/${selection.model.name}`, usage: response.usage },
+          modelId: selection.model.id,
+          provider: selection.model.provider,
+          cost,
+        };
+      } catch (e) {
+        // Gate 22: re-throw abort errors so outer execute() can detect timeout.
+        if (e instanceof DOMException && e.name === 'AbortError' && signal?.aborted) {
+          throw e;
+        }
+        // Non-fallback final candidate: surface the failure. On any earlier
+        // candidate in the ranked chain, move to the next capable candidate.
+        if (attempt >= Math.min(ranked.length, routerLevelFallbackBound) - 1) {
           return { ok: false, error: String(e), reason: 'model-call-failed' };
         }
+        unavailable.add(selection.model.id);
       }
     }
 
@@ -262,13 +349,13 @@ export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRu
       conversationHistory?: ConversationMessage[],
     ): Promise<PlanStepsResult | null> {
       const models = await opts.store.listModels(ctx.ownerId);
-      const neededReasoning = computeNeededReasoning(intent);
-      const selection = opts.modelGateway.select(models, {
-        requirement: intent.resource ?? 'general',
-        neededReasoning,
-        neededTools: true,
-        minContextWindow: null,
-      });
+      // Gate 42: planning derives routing requirements through the SAME canonical
+      // mechanism as execution (buildRoutingRequirements) — honors ctx.agentReasoning,
+      // so plan and execute reasoning floors can never diverge.
+      const req = buildRoutingRequirements(ctx, intent);
+      const routing = router.route(models, req);
+      if (routing.outcome !== 'selected') return null;
+      const selection = routing.selection;
 
       if (!selection.model) return null;
 
@@ -377,7 +464,7 @@ export function createExecutionRunner(opts: ExecutionRunnerOptions): ExecutionRu
       const outputTokens = response.usage?.outputTokens ?? 0;
       const cost = costForTokens(selection.model.costPer1kInput, selection.model.costPer1kOutput, inputTokens, outputTokens);
 
-      return { steps: validSteps, cost, modelId: selection.model.id };
+      return { steps: validSteps, cost, modelId: selection.model.id, provider: selection.model.provider };
     },
   };
 }
@@ -690,6 +777,7 @@ async function runToolLoop(
     ok: true,
     output: { text: lastText, model: `${model.provider}/${model.name}`, usage: { inputTokens, outputTokens }, toolRounds: round },
     modelId: model.id,
+    provider: model.provider,
     cost,
     toolMessages: messages.filter((m) => m.role === 'tool').map((m) => ({
       role: 'tool' as const,

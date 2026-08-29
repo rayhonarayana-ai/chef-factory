@@ -350,11 +350,24 @@ export interface ModelInfo {
   provider: string;
   name: string;
   slug: string;
-  capability: JsonObject; // e.g. { reasoning: 'high', vision: false, tools: true }
+  capability: JsonObject; // e.g. { reasoning: 'high', tools: true }
   contextWindow: number | null;
   costPer1kInput: number;
   costPer1kOutput: number;
   status: 'active' | 'limited' | 'retired';
+}
+
+/**
+ * Gate 42 — Provider-neutral, typed view of a model's declared capability.
+ * Read from `ModelInfo.capability` (JsonObject). NEVER names a provider/model
+ * and NEVER grants authority — it is SUITABILITY metadata only.
+ */
+export interface ModelCapability {
+  reasoning?: 'none' | 'low' | 'medium' | 'high';
+  tools?: boolean;
+  codingStrength?: 'none' | 'low' | 'medium' | 'high';
+  multimodal?: boolean;
+  structuredOutput?: boolean;
 }
 
 export interface ModelSelectionRequest {
@@ -364,12 +377,91 @@ export interface ModelSelectionRequest {
   minContextWindow: number | null;
 }
 
+/**
+ * Gate 42 — Enriched routing requirements. Extends the legacy ModelSelectionRequest
+ * with the full provider-neutral fields a specialist may declare (Gate 40
+ * SpecialistModelNeeds). All fields are SUITABILITY floors; routing never grants
+ * authority and never names a provider/model.
+ */
+export interface ModelRoutingRequirements {
+  requirement: string;
+  neededReasoning: 'none' | 'low' | 'medium' | 'high';
+  neededTools: boolean;
+  minContextWindow: number | null;
+  /** Whether the requirement is a mandatory floor for fields below. */
+  mandatory: boolean;
+  maxCostPerCall: number | null; // optional ceiling on estimated cost
+  /** Optional enriched suitability floors (Gate 40 SpecialistModelNeeds). */
+  neededCodingStrength?: 'none' | 'low' | 'medium' | 'high' | null;
+  neededMultimodal?: boolean | null;
+  neededStructuredOutput?: boolean | null;
+}
+
 export interface ModelSelection {
   model: ModelInfo | null;
   reason: string;
   cheapestCapable: boolean;
   candidates: ModelInfo[];
 }
+
+// ---------- Gate 42 — Routing ----------
+/** Trusted remaining-budget information consumed by the router. Router may READ
+ *  only; it can neither modify budget nor authorize overspend. */
+export interface RoutingBudget {
+  remaining: number | null; // null = unlimited/unknown
+  /** Estimated cost of the candidate about to be selected (computed by caller). */
+  costOfCandidate(estimatedCost: number): boolean;
+}
+
+/**
+ * Provider health signal for routing. A candidate whose provider path is
+ * unavailable/open-circuit may be excluded or deprioritized deterministically.
+ */
+export interface ProviderHealthSignal {
+  provider: string;
+  available: boolean; // false => exclude (open circuit / down)
+}
+
+/** Deterministic, safe routing rationale. Never contains secrets or prompts. */
+export interface SafeRoutingRationale {
+  policyVersion: string;
+  candidateCount: number;
+  capableCount: number;
+  excludedUnavailable: number;
+  requirementSummary: string; // e.g. "reasoning>=medium, tools=true, context>=32000"
+  selectedProvider: string | null;
+  selectedModel: string | null;
+  estimatedCost: number | null;
+  fallbackIndex: number;
+  rejectionReason: RoutingRejection | null;
+}
+
+export type RoutingRejection =
+  | 'no_capable_model'
+  | 'budget_exhausted'
+  | 'all_unavailable'
+  | null;
+
+/**
+ * Gate 42 — Canonical structured routing result (fail-closed). The router NEVER
+ * produces an ambiguous generic error; every outcome carries a safe rationale.
+ */
+export type ModelRoutingResult =
+  | {
+      outcome: 'selected';
+      selection: ModelSelection;
+      rationale: SafeRoutingRationale;
+    }
+  | {
+      outcome: 'no_capable_model';
+      selection: { model: null; reason: string; cheapestCapable: false; candidates: ModelInfo[] };
+      rationale: SafeRoutingRationale;
+    }
+  | {
+      outcome: 'budget_exhausted';
+      selection: { model: null; reason: string; cheapestCapable: false; candidates: ModelInfo[] };
+      rationale: SafeRoutingRationale;
+    };
 
 export interface RuntimeInfo {
   id: string;

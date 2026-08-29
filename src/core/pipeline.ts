@@ -68,6 +68,8 @@ export interface ExecutionOutcome {
   output?: unknown;
   error?: unknown;
   modelId?: string | null;
+  /** Gate 42: actual selected provider, for cost attribution. */
+  provider?: string | null;
   runtimeId?: string | null;
   cost?: number;
   reason?: string;
@@ -86,6 +88,8 @@ export interface PlanStepsResult {
   steps: Array<{ tool: string; args: Record<string, unknown>; description: string; dependsOn: number[] }>;
   cost?: number;
   modelId?: string;
+  /** Gate 42: actual selected provider, for cost attribution. */
+  provider?: string | null;
 }
 
 export interface ExecutionRunner {
@@ -519,10 +523,10 @@ export class CommandPipeline {
           taskId: task.id,
           runId: run.id,
           agentId: task.agentId,
-          costType: 'mission',
+          costType: outcome.modelId ? 'model' : 'mission',
           amount: outcome.cost,
           currency: 'USD',
-          provider: null,
+          provider: outcome.provider ?? null,
           modelId: outcome.modelId ?? null,
           runtimeId: outcome.runtimeId ?? null,
           billedTo: 'project',
@@ -687,23 +691,23 @@ export class CommandPipeline {
 
     // Record planning cost from model call
     const planningCost = planStepsResult.cost ?? 0;
-    if (planningCost > 0) {
-      await this.safeCost({
-        ownerId: ctx.ownerId,
-        projectId: task.projectId,
-        taskId: task.id,
-        runId: run.id,
-        agentId: task.agentId,
-        costType: 'mission',
-        amount: planningCost,
-        currency: 'USD',
-        provider: null,
-        modelId: planStepsResult.modelId ?? null,
-        runtimeId: null,
-        billedTo: 'project',
-        metadata: { phase: 'planning' },
-      });
-    }
+      if (planningCost > 0) {
+        await this.safeCost({
+          ownerId: ctx.ownerId,
+          projectId: task.projectId,
+          taskId: task.id,
+          runId: run.id,
+          agentId: task.agentId,
+          costType: planStepsResult.modelId ? 'model' : 'mission',
+          amount: planningCost,
+          currency: 'USD',
+          provider: planStepsResult.provider ?? null,
+          modelId: planStepsResult.modelId ?? null,
+          runtimeId: null,
+          billedTo: 'project',
+          metadata: { phase: 'planning' },
+        });
+      }
 
     await this.safeAudit({
       actorType: ctx.actorType, actorId: ctx.actorId, action: 'orchestration.completed',
