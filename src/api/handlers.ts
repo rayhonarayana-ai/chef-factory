@@ -18,6 +18,13 @@ import { redactForLog } from './redact.js';
 import { computeSecurityHealth, rlsHealthFromProbe, DEFAULT_HEALTH_CHECKS } from '../core/security/health.js';
 import { validateIncidentInput } from '../core/security/incidents.js';
 import { ConversationService } from '../core/conversation.js';
+import {
+  proposeMissionPlan,
+  decideMissionPlanApproval,
+  materializeAndActivateMission,
+  reconcileMissionTerminalState,
+  reconcileOwnerActiveMissions,
+} from '../core/mission/missionRuntime.js';
 
 export interface ApiRequest {
   method: string;
@@ -139,6 +146,123 @@ export class Api {
         const archived = await this.conversations.archiveConversation(owner.id, convId);
         if (!archived) return { status: 404, json: { error: 'conversation not found' } };
         return this.ok({ ok: true });
+      }
+
+      // ----- Gate 44 — Missions -----
+      // Objective ingress. The OWNER identity is derived from the authenticated
+      // session (owner.id), never accepted from request JSON. Creating an objective
+      // produces a NON-EXECUTABLE draft mission only: no tasks, no agents, no
+      // permissions, no approvals, no tools.
+      case 'POST /api/missions': {
+        const ownerId = owner.id;
+        const projectId = typeof json.projectId === 'string' && json.projectId ? json.projectId : '';
+        const objective = typeof json.objective === 'string' ? json.objective : '';
+        if (!projectId) return { status: 400, json: { error: 'projectId is required' } };
+        if (!objective.trim()) return { status: 400, json: { error: 'objective is required' } };
+        const budgetLimit = typeof json.budgetLimit === 'number' && json.budgetLimit >= 0 ? json.budgetLimit : null;
+        let mission;
+        try {
+          mission = await this.store.createMission(ownerId, {
+            ownerId, projectId, objective: objective.trim(), budgetLimit, createdBy: ownerId,
+          });
+        } catch (e) {
+          return { status: 404, json: { error: `project not found: ${String((e as Error).message)}` } };
+        }
+        return this.ok({ mission });
+      }
+
+      // Propose a plan through the frozen Gate39 validation + hashing path. The
+      // mission stays non-executable until owner approval.
+      case 'POST /api/missions/:missionId/plan': {
+        const missionId = params.missionId;
+        if (!missionId) return { status: 400, json: { error: 'missionId required' } };
+        const proposal = (json.plan ?? {}) as {
+          objective?: unknown; tasks?: unknown; dependencies?: unknown; estimatedBudget?: unknown;
+        };
+        if (typeof proposal.objective !== 'string' || !Array.isArray(proposal.tasks) || !Array.isArray(proposal.dependencies)) {
+          return { status: 400, json: { error: 'plan must be { objective, tasks[], dependencies[] }' } };
+        }
+        const plan: import('../core/types.js').MissionPlanCanonical = {
+          objective: proposal.objective,
+          tasks: proposal.tasks as import('../core/types.js').MissionPlanCanonical['tasks'],
+          dependencies: proposal.dependencies as import('../core/types.js').MissionPlanCanonical['dependencies'],
+          estimatedBudget: typeof proposal.estimatedBudget === 'number' ? proposal.estimatedBudget : null,
+        };
+        const result = await proposeMissionPlan(this.store, owner.id, missionId, plan);
+        if (!result.ok) return { status: 422, json: { error: 'invalid_plan', errors: result.errors, mission: result.mission } };
+        // approval_id is the PENDING approval awaiting the owner's explicit decision
+        // (planning requests review; it never approves).
+        return this.ok({ mission: result.mission, plan: result.plan, plan_hash: result.hash, approval_id: result.approvalId });
+      }
+
+      // Explicit OWNER decision on a proposed mission plan. Plan proposal created a
+      // PENDING approval (returned as approval_id); this endpoint is the distinct
+      // authenticated-owner action that resolves it. ownerId is always derived from
+      // the session (owner.id), never from request JSON. Bound to the exact
+      // missionId + planHash recorded on the approval metadata.
+      case 'POST /api/missions/:missionId/approve': {
+        const missionId = params.missionId;
+        if (!missionId) return { status: 400, json: { error: 'missionId required' } };
+        const approvalId = typeof json.approvalId === 'string' ? json.approvalId : '';
+        if (!approvalId) return { status: 400, json: { error: 'approvalId is required (from POST /plan approval_id)' } };
+        const decision = typeof json.decision === 'string' ? json.decision : '';
+        if (!['approved', 'rejected', 'denied'].includes(decision)) {
+          return { status: 400, json: { error: 'decision must be approved|rejected|denied' } };
+        }
+        const reason = typeof json.reason === 'string' ? json.reason : '';
+        const result = await decideMissionPlanApproval(this.store, owner.id, missionId, approvalId, decision as import('../core/mission/missionRuntime.js').MissionDecision, { reason });
+        if (!result.ok) {
+          if (result.error === 'mission not found' || result.error === 'approval not found') return { status: 404, json: { error: result.error } };
+          return { status: 409, json: { error: result.error, mission: result.mission, approval: result.approval } };
+        }
+        return this.ok({ mission: result.mission, approval: result.approval });
+      }
+
+      // Atomic materialization + activation (only valid owner-approved plans).
+      case 'POST /api/missions/:missionId/materialize': {
+        const missionId = params.missionId;
+        if (!missionId) return { status: 400, json: { error: 'missionId required' } };
+        const proposal = (json.plan ?? {}) as {
+          objective?: unknown; tasks?: unknown; dependencies?: unknown; estimatedBudget?: unknown;
+        };
+        if (typeof proposal.objective !== 'string' || !Array.isArray(proposal.tasks) || !Array.isArray(proposal.dependencies)) {
+          return { status: 400, json: { error: 'plan must be { objective, tasks[], dependencies[] }' } };
+        }
+        const plan: import('../core/types.js').MissionPlanCanonical = {
+          objective: proposal.objective,
+          tasks: proposal.tasks as import('../core/types.js').MissionPlanCanonical['tasks'],
+          dependencies: proposal.dependencies as import('../core/types.js').MissionPlanCanonical['dependencies'],
+          estimatedBudget: typeof proposal.estimatedBudget === 'number' ? proposal.estimatedBudget : null,
+        };
+        const result = await materializeAndActivateMission(this.store, owner.id, missionId, plan);
+        if (!result.ok) return { status: 409, json: { error: result.error, materialize_outcome: result.materializeOutcome, activate_outcome: result.activateOutcome, mission: result.mission } };
+        return this.ok({ mission: result.mission, materialize_outcome: result.materializeOutcome, activate_outcome: result.activateOutcome, queued_task_count: result.queuedTaskCount });
+      }
+
+      // On-demand deterministic terminal reconciliation (also run by the worker).
+      case 'POST /api/missions/:missionId/reconcile': {
+        const missionId = params.missionId;
+        if (!missionId) return { status: 400, json: { error: 'missionId required' } };
+        const result = await reconcileMissionTerminalState(this.store, owner.id, missionId);
+        if (!result.ok && result.error === 'mission not found') return { status: 404, json: { error: result.error } };
+        return this.ok({ mission: result.mission, reconciled: result.reconciled, terminal_status: result.terminalStatus });
+      }
+
+      case 'GET /api/missions': {
+        const missions = await this.store.listMissions(owner.id, {
+          projectId: typeof json.projectId === 'string' ? json.projectId : undefined,
+          status: typeof json.status === 'string' && ['draft', 'pending_approval', 'approved', 'materialized', 'active', 'completed', 'failed', 'cancelled'].includes(json.status) ? json.status as import('../core/types.js').MissionStatus : undefined,
+        });
+        return this.ok({ missions });
+      }
+
+      case 'GET /api/missions/:missionId': {
+        const missionId = params.missionId;
+        if (!missionId) return { status: 400, json: { error: 'missionId required' } };
+        const mission = await this.store.getMission(owner.id, missionId);
+        if (!mission) return { status: 404, json: { error: 'mission not found' } };
+        const tasks = await this.store.listMissionTasks(owner.id, missionId);
+        return this.ok({ mission, tasks });
       }
 
       // ----- Projects -----

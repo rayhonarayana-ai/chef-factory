@@ -90,6 +90,14 @@ const ROUTES: Route[] = (
     ['GET', '/api/conversations'],
     ['GET', '/api/conversations/:conversationId'],
     ['DELETE', '/api/conversations/:conversationId'],
+    // Gate 44 — Mission Execution Engine (owner-scoped control plane surface)
+    ['GET', '/api/missions'],
+    ['GET', '/api/missions/:missionId'],
+    ['POST', '/api/missions'],
+    ['POST', '/api/missions/:missionId/plan'],
+    ['POST', '/api/missions/:missionId/approve'],
+    ['POST', '/api/missions/:missionId/materialize'],
+    ['POST', '/api/missions/:missionId/reconcile'],
   ] as Array<[string, string]>
 ).map(([method, path]) => {
   const paramNames: string[] = [];
@@ -296,7 +304,12 @@ export async function startServer(opts?: { port?: number; host?: string }): Prom
 
         const apiReq: ApiRequest = {
           method: req.method ?? 'GET',
-          path: pathname,
+          // Gate 44: pass the CANONICAL route path (the ROUTES literal with :param
+          // placeholders), which is what the handlers dispatch on, together with the
+          // already-extracted params. Passing the raw pathname here meant any
+          // parameterized route (missions, passports, conversations, approvals
+          // decision) could never reach its handler.
+          path: match.route.path,
           params: match.params,
           body,
           owner,

@@ -20,6 +20,7 @@ import { runWorkforce, type WorkforceOrchestratorOutcome } from '../core/workfor
 import { isGlobalStopActive } from '../core/security/workforceControl.js';
 import { WORKFORCE_SERVICE_ACTOR, WORKFORCE_SERVICE_ACTOR_TYPE, WORKFORCE_SERVICE_AUDIT_ACTOR_ID } from '../core/workforceService.js';
 import { applyJitter, type WorkforceRuntimeConfig } from './config.js';
+import { reconcileOwnerActiveMissions } from '../core/mission/missionRuntime.js';
 
 type Activity = 'work' | 'idle' | 'error';
 
@@ -189,6 +190,24 @@ export class WorkforceWorker {
       }
       if (result.placed > 0 || result.executed > 0 || result.completed > 0 || result.failed > 0) {
         anyWork = true;
+      }
+      // Gate 44 — bounded mission terminal reconciliation. Triggered ONLY when a
+      // task terminal transition (completed/failed) occurred this pass, so the
+      // reconciliation adds no busy-loop. Idempotent and safe under concurrent
+      // workers; cheap (one active-mission listing + per-mission task scan).
+      if (result.completed > 0 || result.failed > 0) {
+        try {
+          const reconciled = await reconcileOwnerActiveMissions(this.#store, ownerId);
+          const updated = reconciled.filter((r) => r.reconciled);
+          if (updated.length > 0) {
+            await this.#audit('worker.mission.reconciled', {
+              ownerId,
+              missions: updated.map((r) => ({ missionId: r.missionId, terminalStatus: r.terminalStatus })),
+            });
+          }
+        } catch (e) {
+          await this.#audit('worker.error', { ownerId, reason: 'mission_reconcile_failed', error: String(e) });
+        }
       }
     }
 
