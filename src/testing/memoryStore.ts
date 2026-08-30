@@ -31,6 +31,7 @@ export class MemoryStore implements Store, WorkforceControlAdminPersistence, Mod
   taskRuns: TaskRunRecord[] = [];
   edges: TaskDependencyRecord[] = [];
   approvals: ApprovalRecord[] = [];
+  preparedDeliveries: import('../core/types.js').PreparedDeliveryRecord[] = [];
   audit: AuditEvent[] = [];
   costs: CostEvent[] = [];
   modelHealth: ModelHealthObservation[] = [];
@@ -520,6 +521,63 @@ export class MemoryStore implements Store, WorkforceControlAdminPersistence, Mod
     const next = { ...a, ...patch };
     this.approvals[this.approvals.indexOf(a)] = next;
     return next;
+  }
+  async createPreparedDelivery(ownerId: string, input: Omit<import('../core/types.js').PreparedDeliveryRecord, 'id' | 'ownerId' | 'approvalId' | 'status' | 'version' | 'commitSha' | 'failureReason' | 'createdAt' | 'updatedAt'>) {
+    const createdAt = now();
+    const row: import('../core/types.js').PreparedDeliveryRecord = { ...input, id: uuid(), ownerId, approvalId: null, status: 'prepared', version: 1, commitSha: null, failureReason: null, createdAt, updatedAt: createdAt };
+    this.preparedDeliveries.push(row);
+    return { ...row, manifest: row.manifest.map((entry) => ({ ...entry })) };
+  }
+  async getPreparedDelivery(ownerId: string, deliveryId: string) {
+    const row = this.preparedDeliveries.find((item) => item.ownerId === ownerId && item.id === deliveryId);
+    return row ? { ...row, manifest: row.manifest.map((entry) => ({ ...entry })) } : null;
+  }
+  async getPreparedDeliveryByApproval(ownerId: string, approvalId: string) {
+    const row = this.preparedDeliveries.find((item) => item.ownerId === ownerId && item.approvalId === approvalId);
+    return row ? { ...row, manifest: row.manifest.map((entry) => ({ ...entry })) } : null;
+  }
+  async linkPreparedDeliveryApproval(ownerId: string, deliveryId: string, approvalId: string) {
+    const row = this.preparedDeliveries.find((item) => item.ownerId === ownerId && item.id === deliveryId && item.approvalId === null);
+    if (!row) return null;
+    const next = { ...row, approvalId, version: row.version + 1, updatedAt: now() };
+    this.preparedDeliveries[this.preparedDeliveries.indexOf(row)] = next;
+    return { ...next, manifest: next.manifest.map((entry) => ({ ...entry })) };
+  }
+async transitionPreparedDelivery(ownerId: string, deliveryId: string, from: import('../core/types.js').PreparedDeliveryStatus, to: import('../core/types.js').PreparedDeliveryStatus, patch: { commitSha?: string | null; failureReason?: string | null } = {}) {
+    const row = this.preparedDeliveries.find((item) => item.ownerId === ownerId && item.id === deliveryId && item.status === from);
+    if (!row) return null;
+    const next = { ...row, status: to, version: row.version + 1, commitSha: patch.commitSha ?? row.commitSha, failureReason: patch.failureReason ?? row.failureReason, updatedAt: now() };
+    this.preparedDeliveries[this.preparedDeliveries.indexOf(row)] = next;
+    return { ...next, manifest: next.manifest.map((entry) => ({ ...entry })) };
+  }
+  async decideApprovalWithPreparedDelivery(ownerId: string, approvalId: string, patch: Required<ApprovalPatch>, deliveryStatus: 'approved' | 'rejected'): Promise<ApprovalRecord | null> {
+    const approval = this.approvals.find((a) => a.ownerId === ownerId && a.id === approvalId);
+    if (!approval) return null;
+    const delivery = this.preparedDeliveries.find((item) => item.ownerId === ownerId && item.approvalId === approvalId);
+    if (!delivery) return null;
+    if (approval.projectId !== delivery.projectId) return null;
+    if (approval.taskId !== delivery.taskId) return null;
+    if (approval.agentId !== delivery.agentId) return null;
+    if (approval.status !== 'pending') return null;
+    const isApprove = deliveryStatus === 'approved';
+    if (isApprove) {
+      approval.status = 'approved';
+      approval.decision = patch.decision;
+      approval.decidedBy = patch.decidedBy ?? ownerId;
+      approval.decidedAt = now();
+      delivery.status = 'approved';
+      delivery.version = (delivery.version ?? 0) + 1;
+      delivery.updatedAt = now();
+    } else {
+      approval.status = 'rejected';
+      approval.decision = patch.decision;
+      approval.decidedBy = patch.decidedBy ?? ownerId;
+      approval.decidedAt = now();
+      delivery.status = 'rejected';
+      delivery.version = (delivery.version ?? 0) + 1;
+      delivery.updatedAt = now();
+    }
+    return approval;
   }
 
   // audit / costs

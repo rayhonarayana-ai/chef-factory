@@ -614,6 +614,8 @@ async function runToolLoop(
       name: toolDef.name,
       action: toolDef.actionType,
       minRisk: toolDef.riskLevel,
+      approvalRequest: toolDef.approvalRequest,
+      approvalBound: toolDef.approvalBound,
       run: async (args: Record<string, unknown>) => {
         return toolDef.handler({
           ownerId: ctx.ownerId,

@@ -272,6 +272,7 @@ export const GATE3_TOOLS: ToolDefinition[] = [
     riskLevel: 'high' as const,
     actionType: 'software.git.stage',
     requiresApproval: false,
+    approvalRequest: true,
     handler: gitPrepareCommitHandler,
   },
   {
@@ -287,6 +288,7 @@ export const GATE3_TOOLS: ToolDefinition[] = [
     riskLevel: 'critical' as const,
     actionType: 'software.git.commit',
     requiresApproval: false,
+    approvalBound: true,
     handler: gitCommitHandler,
   },
 ];

@@ -352,6 +352,13 @@ export class Api {
           decidedBy: resolved.decidedBy,
           decidedAt: resolved.decidedAt,
         });
+        // Gate 47: approval decisions authorize only their immutable linked delivery.
+        const delivery = await this.store.getPreparedDeliveryByApproval(owner.id, approvalId);
+        if (delivery) {
+          const next = resolved.status === 'approved' ? 'approved' : 'rejected';
+          const moved = await this.store.transitionPreparedDelivery(owner.id, delivery.id, 'prepared', next);
+          if (!moved) return { status: 409, json: { error: 'prepared delivery state conflict' } };
+        }
         let task = null;
         if (approval.taskId) {
           const current = await this.store.getTask(owner.id, approval.taskId);

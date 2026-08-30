@@ -1,248 +1,71 @@
-// CHEF FACTORY — Gate 36 V2 — git_prepare_commit tool.
-// Controlled staging with state-bound attribution. Creates approval for human review.
-// Operates under repo-level lock with DB access for attribution queries.
-// Staging is internal (NO agent-visible git_stage). No push.
-
+import { createHash, randomBytes } from 'node:crypto';
+import { unlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { ToolHandlerInput, ToolHandlerResult } from '../../tools/types.js';
-import type { Pool } from 'pg';
-import { getPool } from '../../db/pool.js';
-import { withRepoLock } from '../../workspace/mutation.js';
-import { resolveWorkspace } from '../types.js';
-import { runGit } from '../git/runner.js';
-import { contentHash } from '../../workspace/mutation.js';
-import { scanForSecrets } from '../dlpscan.js';
-import { randomBytes, createHash } from 'node:crypto';
 import type { Store } from '../../core/ports.js';
-import { isProtectedPath } from '../../workspace/protected.js';
-import { isPathContained } from '../../workspace/resolver.js';
-import { readFileSync } from 'node:fs';
+import { resolveWorkspace } from '../types.js';
+import { withRepoLock } from '../../workspace/mutation.js';
+import { runGitWithIndex } from '../git/runner.js';
+import { currentBaseCommit, currentManifest, sameManifest, manifestHash, normalizeCommitMessage, hashCommitMessage } from '../git/delivery.js';
 
 export async function gitPrepareCommitHandler(input: ToolHandlerInput): Promise<ToolHandlerResult> {
-  const { ownerId, args } = input;
-
-  if (!input.store) return { success: false, error: 'store not available' };
-  if (!input.context?.projectId) return { success: false, error: 'project context required' };
-  if (!input.context?.agentId) return { success: false, error: 'agent identity required' };
-  if (!input.context?.taskId) return { success: false, error: 'task identity required' };
-
-  const workspace = await resolveWorkspace(input, input.store as { getPassport: Store['getPassport'] });
-  if (!workspace) return { success: false, error: 'workspace not configured for this project' };
-
-  const message = typeof args.message === 'string' ? args.message : '';
+  const { ownerId, args, context: ctx } = input;
+  const store = input.store as Store | undefined;
+  if (!store || !ctx?.projectId || !ctx.agentId || !ctx.taskId) return { success: false, error: 'project, agent, task, and store are required' };
+  const { projectId, agentId, taskId } = ctx;
+  const message = typeof args.message === 'string' ? args.message.trim() : '';
   if (!message) return { success: false, error: 'commit message is required' };
-  if (message.length > 500) return { success: false, error: 'commit message too long (max 500 chars)' };
-  if (message.length < 3) return { success: false, error: 'commit message too short (min 3 chars)' };
-
-  const ctx = input.context!;
-  const store = input.store as Store;
-  const pool: Pool | import('../../tools/types.js').DbQuery = input.db ?? getPool();
-
+  if (message.length < 3 || message.length > 500) return { success: false, error: 'commit message must be 3-500 chars' };
+  const workspace = await resolveWorkspace(input, store);
+  if (!workspace) return { success: false, error: 'workspace not configured for this project' };
+  const task = await store.getTask(ownerId, taskId);
+  if (!task || task.projectId !== projectId || task.agentId !== agentId || ['completed', 'cancelled', 'failed'].includes(task.status)) return { success: false, error: 'task is not an active assigned project task' };
   try {
-    const result = await withRepoLock(pool, workspace.workspaceRoot, async (db) => {
-      // Step 1: Verify task status is active
-      const taskCheck = await db.query(
-        `SELECT t.status
-         FROM tasks t
-         JOIN projects p ON t.project_id = p.id
-         WHERE t.id = $1 AND p.owner_id = $2 AND t.project_id = $3`,
-        [ctx.taskId, ownerId, ctx.projectId],
-      );
-      if (!taskCheck.rows.length) {
-        return { success: false, error: 'task not found or not owned by this owner/project' };
+    return await withRepoLock(input.db ?? (await import('../../db/pool.js')).getPool(), workspace.workspaceRoot, async () => {
+      const baseCommit = await currentBaseCommit(workspace.workspaceRoot);
+      if (!baseCommit) return { success: false, error: 'cannot resolve exact HEAD base' };
+      const snapshot = await currentManifest(workspace.workspaceRoot);
+      if ('error' in snapshot) return { success: false, error: snapshot.error };
+      const evidence = task.verificationRequired ? (await store.listTaskVerifications(ownerId, task.id)).filter((item) => item.outcome === 'passed').at(-1) : undefined;
+      if (task.verificationRequired && (!evidence?.verificationSessionId || !evidence.workspaceFingerprint)) return { success: false, error: 'verified Gate46 evidence is required' };
+      // Canonical message normalization (single M binding).
+      const normalizedMessage = normalizeCommitMessage(message);
+      const messageHash = hashCommitMessage(normalizedMessage);
+      // Build the exact delivery Git tree SHA (T binding).
+      // 1. Create a temporary index directory.
+      const tempIndexPath = join(tmpdir(), `chef-prepare-index-${randomBytes(16).toString('hex')}`);
+      // 2. Seed the index from the exact base commit.
+      const seed = await runGitWithIndex('read-tree', [baseCommit], workspace.workspaceRoot, tempIndexPath);
+      if (!seed.ok) return { success: false, error: `temp_index_seed_failed:${seed.outcome}` };
+      // 3. Apply the prepared delivery changes to the index.
+      //    - For 'A' (added) and 'M' (modified) entries: stage the files.
+      //    - For 'D' (deleted) entries: remove from index.
+      const manifestEntries = snapshot.manifest;
+      const addPaths = manifestEntries.filter((e) => e.kind !== 'D').map((e) => e.path);
+      if (addPaths.length > 0) {
+        const stage = await runGitWithIndex('add', ['-A', '--', ...addPaths], workspace.workspaceRoot, tempIndexPath);
+        if (!stage.ok) return { success: false, error: `temp_index_stage_failed:${stage.outcome}` };
       }
-      const task = taskCheck.rows[0] as { status: string };
-      if (task.status === 'completed' || task.status === 'cancelled' || task.status === 'failed') {
-        return { success: false, error: `task status ${task.status} is not active — cannot prepare commit` };
+      const delPaths = manifestEntries.filter((e) => e.kind === 'D').map((e) => e.path);
+      if (delPaths.length > 0) {
+        const rm = await runGitWithIndex('rm', ['-r', '--cached', ...delPaths], workspace.workspaceRoot, tempIndexPath);
+        if (!rm.ok) return { success: false, error: `temp_index_rm_failed:${rm.outcome}` };
       }
-
-      // Step 2: Scan working tree to find changed files
-      const statusResult = await runGit({ subcommand: 'status', args: ['--porcelain'], cwd: workspace.workspaceRoot });
-      if (!statusResult.ok) {
-        return { success: false, error: `git status failed: ${statusResult.stderr}` };
-      }
-
-      const lines = statusResult.stdout.split('\n').filter(l => l.length >= 3);
-      if (lines.length === 0) {
-        return { success: false, error: 'no changes to commit' };
-      }
-
-      const candidatePaths: string[] = [];
-      for (const line of lines) {
-        const relativePath = line.substring(3).trim();
-        if (relativePath && !relativePath.includes('..')) {
-          candidatePaths.push(relativePath);
-        }
-      }
-
-      if (candidatePaths.length === 0) {
-        return { success: false, error: 'no valid candidate paths found' };
-      }
-
-      // Step 3: Attribution state-binding checks
-      const fingerprints: string[] = [];
-      const verificationEvidence: string[] = [];
-      const lockEvidence: string[] = [];
-
-      for (const relPath of candidatePaths) {
-        // 3a: Validate path
-        const { resolve: pathResolve } = await import('node:path');
-        const canonical = pathResolve(workspace.workspaceRoot, relPath);
-        const containment = isPathContained(canonical, workspace.workspaceRoot);
-        if (!containment.ok) {
-          return { success: false, error: `path validation failed for ${relPath}: ${containment.error}` };
-        }
-        const canonicalRelative = containment.relative!;
-
-        if (isProtectedPath(relPath)) {
-          return { success: false, error: `protected path in candidates: ${relPath}` };
-        }
-
-        // 3b: Latest-mutation attribution check
-        const latestMutation = await db.query(
-          `SELECT ae.id, ae.actor_id, ae.task_id, ae.metadata
-           FROM audit_events ae
-           JOIN projects p ON ae.project_id = p.id
-           WHERE ae.resource_type = 'file'
-             AND ae.resource_id = $1
-             AND p.owner_id = $2
-             AND ae.project_id = $3
-           ORDER BY ae.id DESC
-           LIMIT 1`,
-          [canonicalRelative, ownerId, ctx.projectId],
-        );
-
-        if (!latestMutation.rows.length) {
-          return { success: false, error: `no attribution record for ${relPath} — cannot prepare commit` };
-        }
-
-        const latestEvent = latestMutation.rows[0] as { actor_id: string; task_id: string; metadata: unknown };
-        const metadata = typeof latestEvent.metadata === 'string'
-          ? JSON.parse(latestEvent.metadata) as { resultingHash?: string }
-          : latestEvent.metadata as { resultingHash?: string };
-
-        // Verify hash binding
-        if (metadata.resultingHash) {
-          try {
-            const fileContent = readFileSync(pathResolve(workspace.workspaceRoot, relPath), 'utf-8');
-            const currentHash = contentHash(fileContent);
-            if (currentHash !== metadata.resultingHash) {
-              return {
-                success: false,
-                error: `hash mismatch for ${relPath}: current ${currentHash} != attributed ${metadata.resultingHash}`,
-              };
-            }
-          } catch {
-            return { success: false, error: `cannot read file ${relPath} for hash verification` };
-          }
-        }
-
-        // Verify task attribution
-        if (latestEvent.actor_id !== ctx.agentId) {
-          return {
-            success: false,
-            error: `attribution mismatch for ${relPath}: attributed to ${latestEvent.actor_id}, current agent is ${ctx.agentId}`,
-          };
-        }
-        if (latestEvent.task_id !== ctx.taskId) {
-          return {
-            success: false,
-            error: `task mismatch for ${relPath}: attributed to task ${latestEvent.task_id}, current task is ${ctx.taskId}`,
-          };
-        }
-
-        // Step 4: Compute fingerprint
-        try {
-          const fileContent = readFileSync(pathResolve(workspace.workspaceRoot, relPath), 'utf-8');
-          const fingerprint = createHash('sha256').update(fileContent).digest('hex');
-          fingerprints.push(`${relPath}:${fingerprint}`);
-        } catch {
-          return { success: false, error: `cannot read file ${relPath} for fingerprint` };
-        }
-
-        lockEvidence.push(`pg_advisory_lock:${workspace.workspaceRoot}:${relPath}`);
-      }
-
-      // Step 5: DLP scan
-      for (const relPath of candidatePaths) {
-        try {
-          const { resolve: pathResolve } = await import('node:path');
-          const fileContent = readFileSync(pathResolve(workspace.workspaceRoot, relPath), 'utf-8');
-          const dlpResult = scanForSecrets(fileContent);
-          if (!dlpResult.clean) {
-            return {
-              success: false,
-              error: `DLP violation in ${relPath}: ${dlpResult.reason}`,
-            };
-          }
-        } catch {
-          return { success: false, error: `cannot read file ${relPath} for DLP scan` };
-        }
-      }
-
-      // Step 6: Record attribution event
-      const commitHash = randomBytes(16).toString('hex');
-      const overallFingerprint = createHash('sha256').update(fingerprints.join('|')).digest('hex');
-
-      try {
-        await db.query(
-          `INSERT INTO audit_events
-           (actor_type, actor_id, action, project_id, environment_id,
-            resource_type, resource_id, task_id, metadata)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          [
-            'agent',
-            ctx.agentId,
-            'git.prepare_commit',
-            ctx.projectId,
-            ctx.environment,
-            'commit',
-            commitHash,
-            ctx.taskId,
-            JSON.stringify({
-              message,
-              candidates: candidatePaths,
-              overallFingerprint,
-              verificationEvidence,
-              lockEvidence,
-            }),
-          ],
-        );
-      } catch (insertErr) {
-        return { success: false, error: 'attribution_persistence_failed' };
-      }
-
-      // Step 7: Create approval via Store (schema-correct)
-      let approvalId: string;
-      try {
-        const approval = await store.createApproval(ownerId, {
-          projectId: ctx.projectId,
-          taskId: ctx.taskId,
-          agentId: ctx.agentId,
-          action: 'git.commit',
-          description: `Commit: ${message}`,
-          riskLevel: 'critical',
-          requestedBy: ctx.agentId,
-        });
-        approvalId = approval.id;
-      } catch {
-        return { success: false, error: 'approval_creation_failed' };
-      }
-
-      return {
-        success: true,
-        data: {
-          approvalId,
-          commitHash,
-          candidates: candidatePaths,
-          overallFingerprint,
-          message,
-          status: 'awaiting_approval',
-        },
-      };
+      // 4. Compute the resulting Git tree SHA using the safe Git primitive.
+      const tree = await runGitWithIndex('write-tree', [], workspace.workspaceRoot, tempIndexPath);
+      if (!tree.ok) return { success: false, error: `temp_tree_compute_failed:${tree.outcome}` };
+      const treeSha = tree.stdout.trim();
+      if (!/^[0-9a-f]{40,64}$/.test(treeSha)) return { success: false, error: `invalid_tree_sha:${treeSha}` };
+      // 5. Persist that exact SHA as preparedTreeSha = T.
+      //    Do NOT create a commit. Do NOT touch the real Git index.
+      const delivery = await store.createPreparedDelivery(ownerId, { projectId, taskId, agentId, message: normalizedMessage, baseCommit, preparedTreeSha: treeSha, manifest: snapshot.manifest, manifestFingerprint: manifestHash(snapshot.manifest), workspaceFingerprint: evidence?.workspaceFingerprint ?? null, messageHash, verificationSessionId: evidence?.verificationSessionId ?? null, verificationWorkspaceFingerprint: evidence?.workspaceFingerprint ?? null });
+      const approval = await store.createApproval(ownerId, { projectId, taskId, agentId, action: 'git.commit', description: `Commit: ${message}`, riskLevel: 'critical', requestedBy: agentId, metadata: { preparedDeliveryId: delivery.id, manifestFingerprint: delivery.manifestFingerprint } });
+      const linked = await store.linkPreparedDeliveryApproval(ownerId, delivery.id, approval.id);
+      if (!linked) return { success: false, error: 'delivery_approval_link_failed' };
+      // BEST-EFFORT cleanup of temp index.
+      try { unlinkSync(tempIndexPath); } catch { /* best effort */ }
+      return { success: true, data: { deliveryId: linked.id, approvalId: approval.id, baseCommit, manifest: linked.manifest, manifestFingerprint: linked.manifestFingerprint, status: linked.status, preparedTreeSha: treeSha } };
     });
-
-    return result;
-  } catch (e) {
-    return { success: false, error: `prepare_commit failed: ${String(e)}` };
-  }
+  } catch (error) { return { success: false, error: `prepare_commit failed: ${String(error)}` }; }
 }

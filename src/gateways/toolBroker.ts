@@ -10,6 +10,10 @@ export interface Tool {
   name: string;
   action: string; // audit action label
   minRisk: RiskLevel; // maximum risk this tool may handle
+  /** The operation creates an approval request rather than performing the protected action. */
+  approvalRequest?: boolean;
+  /** The handler independently verifies a durable approved decision before acting. */
+  approvalBound?: boolean;
   run(args: Record<string, unknown>): Promise<unknown>;
 }
 
@@ -47,7 +51,9 @@ export class ToolBroker {
     if (ctx.decision === 'deny') {
       return { ok: false, tool: request.tool, action: tool.action, outcome: 'denied_by_authority', metadata: {} };
     }
-    if (ctx.decision === 'require_approval' && !ctx.approved) {
+    // A request must be able to create the approval it needs. A bound execution is
+    // safe only because its handler verifies the linked durable approval itself.
+    if (ctx.decision === 'require_approval' && !ctx.approved && !tool.approvalRequest && !tool.approvalBound) {
       return { ok: false, tool: request.tool, action: tool.action, outcome: 'requires_approval', metadata: {} };
     }
     // risk ranking check

@@ -361,6 +361,8 @@ export async function executeOrchestration(
       name: toolDef.name,
       action: toolDef.actionType,
       minRisk: toolDef.riskLevel,
+      approvalRequest: toolDef.approvalRequest,
+      approvalBound: toolDef.approvalBound,
       run: async (args: Record<string, unknown>) => {
         return toolDef.handler({ ownerId: ctx.actorCtx.ownerId, args, db: ctx.toolDb, store: ctx.store });
       },

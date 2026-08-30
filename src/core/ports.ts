@@ -32,6 +32,8 @@ import type {
   TaskRecord,
   TaskRunRecord,
   TaskVerificationRecord,
+  PreparedDeliveryRecord,
+  PreparedDeliveryStatus,
 } from '../core/types.js';
 
 import type {
@@ -333,6 +335,14 @@ export interface Store {
   getApproval(ownerId: string, approvalId: string): Promise<ApprovalRecord | null>;
   listApprovals(ownerId: string, filter?: { projectId?: string; taskId?: string; status?: ApprovalRecord['status'] }): Promise<ApprovalRecord[]>;
   patchApproval(ownerId: string, approvalId: string, patch: ApprovalPatch): Promise<ApprovalRecord>;
+  decideApprovalWithPreparedDelivery(ownerId: string, approvalId: string, patch: Required<ApprovalPatch>, deliveryStatus: 'approved' | 'rejected'): Promise<ApprovalRecord | null>;
+
+  // Gate 47: immutable delivery payloads are prepared once and consumed via CAS.
+  createPreparedDelivery(ownerId: string, input: Omit<PreparedDeliveryRecord, 'id' | 'ownerId' | 'approvalId' | 'status' | 'version' | 'commitSha' | 'failureReason' | 'createdAt' | 'updatedAt'>): Promise<PreparedDeliveryRecord>;
+  getPreparedDelivery(ownerId: string, deliveryId: string): Promise<PreparedDeliveryRecord | null>;
+  getPreparedDeliveryByApproval(ownerId: string, approvalId: string): Promise<PreparedDeliveryRecord | null>;
+  linkPreparedDeliveryApproval(ownerId: string, deliveryId: string, approvalId: string): Promise<PreparedDeliveryRecord | null>;
+  transitionPreparedDelivery(ownerId: string, deliveryId: string, from: PreparedDeliveryStatus, to: PreparedDeliveryStatus, patch?: { commitSha?: string | null; failureReason?: string | null }): Promise<PreparedDeliveryRecord | null>;
 
   // audit (append-only)
   recordAudit(event: AuditEvent): Promise<void>;

@@ -3,16 +3,23 @@
 // Reuses Gate 35B security patterns: shell=false, env allowlist, timeout, output bounds, DLP.
 // Does NOT expose VerificationProfile/VerificationResult — Git has its own types.
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { redactText } from '../../core/redact.js';
 import { buildGitChildEnv } from './env.js';
 import { GIT_CONSTANTS, type GitResult, type GitOutcome } from './types.js';
 
+export const TRUSTED_SERVICE_IDENTITY = {
+  authorName: 'CHEF Service',
+  authorEmail: 'chef@factory.invalid',
+  committerName: 'CHEF Service',
+  committerEmail: 'chef@factory.invalid',
+};
+
 export interface GitRunnerInput {
   /** Git subcommand: 'status' or 'diff'. Fixed by server, not from agent. */
-  subcommand: 'status' | 'diff';
+  subcommand: 'status' | 'diff' | 'rev-parse' | 'show';
   /** Fixed arguments for the subcommand. Resolved server-side. */
   args: readonly string[];
   /** Workspace root (from passport). */
@@ -32,7 +39,6 @@ export function resolveGitExecutable(): string {
   if (resolvedGitPath && existsSync(resolvedGitPath)) return resolvedGitPath;
 
   try {
-    const { execFileSync } = require('node:child_process');
     const result = execFileSync('where', ['git'], {
       encoding: 'utf-8',
       windowsHide: true,
@@ -264,7 +270,19 @@ export async function runGitWithIndex(
     '-c', 'diff.textconv=',
   ];
 
-  const fullArgs = [...configOverrides, subcommand, ...extraArgs];
+  // Delivery commits never inherit a repository/user identity. Attribution is the
+  // fixed service identity; the record carries the requesting agent separately.
+  const fullArgs = [
+      ...configOverrides,
+      '-c', `user.name=${TRUSTED_SERVICE_IDENTITY.authorName}`,
+      '-c', `user.email=${TRUSTED_SERVICE_IDENTITY.authorEmail}`,
+      '-c', `commit.author.name=${TRUSTED_SERVICE_IDENTITY.authorName}`,
+      '-c', `commit.author.email=${TRUSTED_SERVICE_IDENTITY.authorEmail}`,
+      '-c', `committer.name=${TRUSTED_SERVICE_IDENTITY.committerName}`,
+      '-c', `committer.email=${TRUSTED_SERVICE_IDENTITY.committerEmail}`,
+      subcommand,
+      ...extraArgs,
+    ];
   const childEnv = buildGitChildEnv(process.env, indexFile);
 
   const timeoutMs = GIT_CONSTANTS.DEFAULT_TIMEOUT_MS;

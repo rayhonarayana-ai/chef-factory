@@ -31,7 +31,7 @@ import type {
   TaskRunRecord,
   TaskVerificationRecord,
 } from '../core/types.js';
-import type { AgentStats, AgentWorkload, BudgetReport, Store, WorkforceControlAdminPersistence, ModelHealthPersistence } from '../core/ports.js';
+import type { AgentStats, AgentWorkload, BudgetReport, Store, ApprovalPatch, WorkforceControlAdminPersistence, ModelHealthPersistence } from '../core/ports.js';
 import { aggregateModelHealth, DEFAULT_HEALTH_POLICY } from '../core/modelHealth.js';
 import type { WorkforceControlRecord } from '../core/security/workforceControl.js';
 import { emptyPassport } from '../core/passport.js';
@@ -1208,6 +1208,55 @@ export class SupabaseStore implements Store, WorkforceControlAdminPersistence, M
       params,
     );
     return rows[0]!;
+  }
+
+  async createPreparedDelivery(ownerId: string, input: Omit<import('../core/types.js').PreparedDeliveryRecord, 'id' | 'ownerId' | 'approvalId' | 'status' | 'version' | 'commitSha' | 'failureReason' | 'createdAt' | 'updatedAt'>): Promise<import('../core/types.js').PreparedDeliveryRecord> {
+    const rows = await this.q<import('../core/types.js').PreparedDeliveryRecord>(`insert into public.prepared_deliveries (owner_id, project_id, task_id, agent_id, message, message_hash, base_commit, prepared_tree_sha, manifest, manifest_fingerprint, workspace_fingerprint, verification_session_id, verification_workspace_fingerprint) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning id, owner_id as "ownerId", project_id as "projectId", task_id as "taskId", agent_id as "agentId", approval_id as "approvalId", message, message_hash as "messageHash", base_commit as "baseCommit", prepared_tree_sha as "preparedTreeSha", manifest, manifest_fingerprint as "manifestFingerprint", workspace_fingerprint as "workspaceFingerprint", verification_session_id as "verificationSessionId", verification_workspace_fingerprint as "verificationWorkspaceFingerprint", status, version, commit_sha as "commitSha", failure_reason as "failureReason", created_at as "createdAt", updated_at as "updatedAt"`, [ownerId, input.projectId, input.taskId, input.agentId, input.message, input.messageHash, input.baseCommit, input.preparedTreeSha, JSON.stringify(input.manifest), input.manifestFingerprint, input.workspaceFingerprint ?? null, input.verificationSessionId, input.verificationWorkspaceFingerprint]);
+    return rows[0]!;
+  }
+  async getPreparedDelivery(ownerId: string, deliveryId: string): Promise<import('../core/types.js').PreparedDeliveryRecord | null> {
+    const rows = await this.q<import('../core/types.js').PreparedDeliveryRecord>(`select id, owner_id as "ownerId", project_id as "projectId", task_id as "taskId", agent_id as "agentId", approval_id as "approvalId", message, message_hash as "messageHash", base_commit as "baseCommit", prepared_tree_sha as "preparedTreeSha", manifest, manifest_fingerprint as "manifestFingerprint", workspace_fingerprint as "workspaceFingerprint", verification_session_id as "verificationSessionId", verification_workspace_fingerprint as "verificationWorkspaceFingerprint", status, version, commit_sha as "commitSha", failure_reason as "failureReason", created_at as "createdAt", updated_at as "updatedAt" from public.prepared_deliveries where owner_id=$1 and id=$2`, [ownerId, deliveryId]); return rows[0] ?? null;
+  }
+  async getPreparedDeliveryByApproval(ownerId: string, approvalId: string): Promise<import('../core/types.js').PreparedDeliveryRecord | null> {
+    const rows = await this.q<import('../core/types.js').PreparedDeliveryRecord>(`select id, owner_id as "ownerId", project_id as "projectId", task_id as "taskId", agent_id as "agentId", approval_id as "approvalId", message, message_hash as "messageHash", base_commit as "baseCommit", prepared_tree_sha as "preparedTreeSha", manifest, manifest_fingerprint as "manifestFingerprint", workspace_fingerprint as "workspaceFingerprint", verification_session_id as "verificationSessionId", verification_workspace_fingerprint as "verificationWorkspaceFingerprint", status, version, commit_sha as "commitSha", failure_reason as "failureReason", created_at as "createdAt", updated_at as "updatedAt" from public.prepared_deliveries where owner_id=$1 and approval_id=$2`, [ownerId, approvalId]); return rows[0] ?? null;
+  }
+async linkPreparedDeliveryApproval(ownerId: string, deliveryId: string, approvalId: string) { const rows = await this.q<import('../core/types.js').PreparedDeliveryRecord>(`update public.prepared_deliveries set approval_id=$3, version=version+1, updated_at=now() where owner_id=$1 and id=$2 and approval_id is null returning id, owner_id as "ownerId", project_id as "projectId", task_id as "taskId", agent_id as "agentId", approval_id as "approvalId", message, message_hash as "messageHash", base_commit as "baseCommit", prepared_tree_sha as "preparedTreeSha", manifest, manifest_fingerprint as "manifestFingerprint", workspace_fingerprint as "workspaceFingerprint", verification_session_id as "verificationSessionId", verification_workspace_fingerprint as "verificationWorkspaceFingerprint", status, version, commit_sha as "commitSha", failure_reason as "failureReason", created_at as "createdAt", updated_at as "updatedAt"`, [ownerId, deliveryId, approvalId]); return rows[0] ?? null; }
+  async transitionPreparedDelivery(ownerId: string, deliveryId: string, from: import('../core/types.js').PreparedDeliveryStatus, to: import('../core/types.js').PreparedDeliveryStatus, patch: { commitSha?: string | null; failureReason?: string | null } = {}) { const rows = await this.q<import('../core/types.js').PreparedDeliveryRecord>(`update public.prepared_deliveries set status=$4, commit_sha=coalesce($5, commit_sha), failure_reason=coalesce($6, failure_reason), version=version+1, updated_at=now() where owner_id=$1 and id=$2 and status=$3 returning id, owner_id as "ownerId", project_id as "projectId", task_id as "taskId", agent_id as "agentId", approval_id as "approvalId", message, message_hash as "messageHash", base_commit as "baseCommit", prepared_tree_sha as "preparedTreeSha", manifest, manifest_fingerprint as "manifestFingerprint", workspace_fingerprint as "workspaceFingerprint", verification_session_id as "verificationSessionId", verification_workspace_fingerprint as "verificationWorkspaceFingerprint", status, version, commit_sha as "commitSha", failure_reason as "failureReason", created_at as "createdAt", updated_at as "updatedAt"`, [ownerId, deliveryId, from, to, patch.commitSha ?? null, patch.failureReason ?? null]); return rows[0] ?? null; }
+  async decideApprovalWithPreparedDelivery(ownerId: string, approvalId: string, patch: Required<ApprovalPatch>, deliveryStatus: 'approved' | 'rejected'): Promise<ApprovalRecord | null> {
+    const approval = await this.getApproval(ownerId, approvalId);
+    if (!approval) return null;
+    // Gate47 security: must bind to exact linked prepared delivery
+    const delivery = await this.getPreparedDeliveryByApproval(ownerId, approvalId);
+    if (!delivery) return null;
+    if (approval.projectId !== delivery.projectId) return null;
+    if (approval.taskId !== delivery.taskId) return null;
+    if (approval.agentId !== delivery.agentId) return null;
+    if (approval.status !== 'pending') return null;
+    const isApprove = deliveryStatus === 'approved';
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      if (isApprove) {
+        const result = await client.query<ApprovalRecord>(`update public.approvals set status=$3, decision=$4, decided_by=$5, decided_at=now() where owner_id=$1 and id=$2 returning *`, [ownerId, approvalId, 'approved', patch.decision, patch.decidedBy ?? ownerId]);
+        if (!result.rowCount) { await client.query('rollback'); return null; }
+        const upd = await client.query(`update public.prepared_deliveries set status=$3, version=version+1, updated_at=now() where owner_id=$1 and id=$2 and status=$4 returning *`, [ownerId, delivery.id, 'approved', 'prepared']);
+        if (!upd.rowCount) { await client.query('rollback'); return null; }
+        await client.query('commit');
+        return result.rows[0]!;
+      } else {
+        const result = await client.query<ApprovalRecord>(`update public.approvals set status=$3, decision=$4, decided_by=$5, decided_at=now() where owner_id=$1 and id=$2 returning *`, [ownerId, approvalId, 'rejected', patch.decision, patch.decidedBy ?? ownerId]);
+        if (!result.rowCount) { await client.query('rollback'); return null; }
+        const upd = await client.query(`update public.prepared_deliveries set status=$3, version=version+1, updated_at=now() where owner_id=$1 and id=$2 and status=$4 returning *`, [ownerId, delivery.id, 'rejected', 'prepared']);
+        if (!upd.rowCount) { await client.query('rollback'); return null; }
+        await client.query('commit');
+        return result.rows[0]!;
+      }
+    } catch (e) {
+      await client.query('rollback');
+      throw e;
+    } finally {
+      client.release();
+    }
   }
 
   // ---------- audit ----------

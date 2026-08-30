@@ -43,5 +43,7 @@ export interface ToolDefinition {
   riskLevel: 'low' | 'medium' | 'high' | 'critical';
   actionType: string;
   requiresApproval: boolean;
+  approvalRequest?: boolean;
+  approvalBound?: boolean;
   handler: ToolHandler;
 }

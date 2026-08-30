@@ -386,6 +386,40 @@ export interface ApprovalRecord {
   createdAt: string;
 }
 
+// ---------- Gate 47 — Immutable prepared delivery ----------
+export const PREPARED_DELIVERY_STATUSES = ['prepared', 'approved', 'rejected', 'committing', 'committed', 'failed', 'stale', 'ambiguous'] as const;
+export type PreparedDeliveryStatus = (typeof PREPARED_DELIVERY_STATUSES)[number];
+
+export interface DeliveryManifestEntry {
+  path: string;
+  kind: 'A' | 'M' | 'D';
+  sha256: string | null; // null only for a deletion
+}
+
+export interface PreparedDeliveryRecord {
+  id: string;
+  ownerId: string;
+  projectId: string;
+  taskId: string;
+  agentId: string;
+  approvalId: string | null;
+  message: string;
+  messageHash: string;
+  baseCommit: string;
+  preparedTreeSha: string;
+  manifest: DeliveryManifestEntry[];
+  manifestFingerprint: string;
+  workspaceFingerprint?: string | null;
+  verificationSessionId: string | null;
+  verificationWorkspaceFingerprint?: string | null;
+  status: PreparedDeliveryStatus;
+  version: number;
+  commitSha: string | null;
+  failureReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // ---------- Models / Runtimes ----------
 export interface ModelInfo {
   id: string;
