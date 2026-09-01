@@ -550,7 +550,8 @@ async transitionPreparedDelivery(ownerId: string, deliveryId: string, from: impo
     this.preparedDeliveries[this.preparedDeliveries.indexOf(row)] = next;
     return { ...next, manifest: next.manifest.map((entry) => ({ ...entry })) };
   }
-  async decideApprovalWithPreparedDelivery(ownerId: string, approvalId: string, patch: Required<ApprovalPatch>, deliveryStatus: 'approved' | 'rejected'): Promise<ApprovalRecord | null> {
+  async decideApprovalWithPreparedDelivery(ownerId: string, approvalId: string, patch: Required<ApprovalPatch>, approvalStatus: Extract<ApprovalRecord['status'], 'approved' | 'rejected' | 'denied'>): Promise<ApprovalRecord | null> {
+    if (!['approved', 'rejected', 'denied'].includes(approvalStatus)) return null;
     const approval = this.approvals.find((a) => a.ownerId === ownerId && a.id === approvalId);
     if (!approval) return null;
     const delivery = this.preparedDeliveries.find((item) => item.ownerId === ownerId && item.approvalId === approvalId);
@@ -559,25 +560,11 @@ async transitionPreparedDelivery(ownerId: string, deliveryId: string, from: impo
     if (approval.taskId !== delivery.taskId) return null;
     if (approval.agentId !== delivery.agentId) return null;
     if (approval.status !== 'pending') return null;
-    const isApprove = deliveryStatus === 'approved';
-    if (isApprove) {
-      approval.status = 'approved';
-      approval.decision = patch.decision;
-      approval.decidedBy = patch.decidedBy ?? ownerId;
-      approval.decidedAt = now();
-      delivery.status = 'approved';
-      delivery.version = (delivery.version ?? 0) + 1;
-      delivery.updatedAt = now();
-    } else {
-      approval.status = 'rejected';
-      approval.decision = patch.decision;
-      approval.decidedBy = patch.decidedBy ?? ownerId;
-      approval.decidedAt = now();
-      delivery.status = 'rejected';
-      delivery.version = (delivery.version ?? 0) + 1;
-      delivery.updatedAt = now();
-    }
-    return approval;
+    const nextApproval = { ...approval, ...patch, status: approvalStatus };
+    const nextDelivery = { ...delivery, status: approvalStatus === 'approved' ? 'approved' as const : 'rejected' as const, version: (delivery.version ?? 0) + 1, updatedAt: now() };
+    this.approvals[this.approvals.indexOf(approval)] = nextApproval;
+    this.preparedDeliveries[this.preparedDeliveries.indexOf(delivery)] = nextDelivery;
+    return nextApproval;
   }
 
   // audit / costs

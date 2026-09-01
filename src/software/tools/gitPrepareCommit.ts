@@ -8,6 +8,7 @@ import { resolveWorkspace } from '../types.js';
 import { withRepoLock } from '../../workspace/mutation.js';
 import { runGitWithIndex } from '../git/runner.js';
 import { currentBaseCommit, currentManifest, sameManifest, manifestHash, normalizeCommitMessage, hashCommitMessage } from '../git/delivery.js';
+import { fingerprintWorkspace } from '../../workspace/integrity.js';
 
 export async function gitPrepareCommitHandler(input: ToolHandlerInput): Promise<ToolHandlerResult> {
   const { ownerId, args, context: ctx } = input;
@@ -27,8 +28,18 @@ export async function gitPrepareCommitHandler(input: ToolHandlerInput): Promise<
       if (!baseCommit) return { success: false, error: 'cannot resolve exact HEAD base' };
       const snapshot = await currentManifest(workspace.workspaceRoot);
       if ('error' in snapshot) return { success: false, error: snapshot.error };
-      const evidence = task.verificationRequired ? (await store.listTaskVerifications(ownerId, task.id)).filter((item) => item.outcome === 'passed').at(-1) : undefined;
-      if (task.verificationRequired && (!evidence?.verificationSessionId || !evidence.workspaceFingerprint)) return { success: false, error: 'verified Gate46 evidence is required' };
+      const evidence = (await store.listTaskVerifications(ownerId, task.id)).filter((item) =>
+        item.projectId === projectId
+        && item.taskId === taskId
+        && item.outcome === 'passed'
+        && typeof item.verificationSessionId === 'string'
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(item.verificationSessionId)
+        && typeof item.workspaceFingerprint === 'string'
+        && /^[0-9a-f]{64}$/.test(item.workspaceFingerprint),
+      ).at(-1);
+      if (!evidence) return { success: false, error: 'verified Gate46 evidence is required' };
+      const currentWorkspace = await fingerprintWorkspace(workspace.workspaceRoot);
+      if (!currentWorkspace.ok || currentWorkspace.value.fingerprint !== evidence.workspaceFingerprint) return { success: false, error: 'verified Gate46 workspace evidence is stale or mismatched' };
       // Canonical message normalization (single M binding).
       const normalizedMessage = normalizeCommitMessage(message);
       const messageHash = hashCommitMessage(normalizedMessage);
@@ -59,8 +70,8 @@ export async function gitPrepareCommitHandler(input: ToolHandlerInput): Promise<
       if (!/^[0-9a-f]{40,64}$/.test(treeSha)) return { success: false, error: `invalid_tree_sha:${treeSha}` };
       // 5. Persist that exact SHA as preparedTreeSha = T.
       //    Do NOT create a commit. Do NOT touch the real Git index.
-      const delivery = await store.createPreparedDelivery(ownerId, { projectId, taskId, agentId, message: normalizedMessage, baseCommit, preparedTreeSha: treeSha, manifest: snapshot.manifest, manifestFingerprint: manifestHash(snapshot.manifest), workspaceFingerprint: evidence?.workspaceFingerprint ?? null, messageHash, verificationSessionId: evidence?.verificationSessionId ?? null, verificationWorkspaceFingerprint: evidence?.workspaceFingerprint ?? null });
-      const approval = await store.createApproval(ownerId, { projectId, taskId, agentId, action: 'git.commit', description: `Commit: ${message}`, riskLevel: 'critical', requestedBy: agentId, metadata: { preparedDeliveryId: delivery.id, manifestFingerprint: delivery.manifestFingerprint } });
+      const delivery = await store.createPreparedDelivery(ownerId, { projectId, taskId, agentId, message: normalizedMessage, baseCommit, preparedTreeSha: treeSha, manifest: snapshot.manifest, manifestFingerprint: manifestHash(snapshot.manifest), workspaceFingerprint: evidence.workspaceFingerprint, messageHash, verificationSessionId: evidence.verificationSessionId, verificationWorkspaceFingerprint: evidence.workspaceFingerprint });
+      const approval = await store.createApproval(ownerId, { projectId, taskId, agentId, action: 'git.commit', description: `Commit: ${message}`, riskLevel: 'critical', requestedBy: ownerId, metadata: { preparedDeliveryId: delivery.id, manifestFingerprint: delivery.manifestFingerprint } });
       const linked = await store.linkPreparedDeliveryApproval(ownerId, delivery.id, approval.id);
       if (!linked) return { success: false, error: 'delivery_approval_link_failed' };
       // BEST-EFFORT cleanup of temp index.

@@ -329,8 +329,12 @@ export class Api {
         if (!['approved', 'rejected', 'denied'].includes(decision)) {
           return { status: 400, json: { error: 'decision must be approved|rejected|denied' } };
         }
+        const decisionStatus = decision as Extract<ApprovalStatus, 'approved' | 'rejected' | 'denied'>;
         const approval = await this.store.getApproval(owner.id, approvalId);
         if (!approval) return { status: 404, json: { error: 'approval not found' } };
+        // This server-derived lookup is the only generic-vs-delivery distinction.
+        // Client/model input never selects the less-restrictive generic path.
+        const delivery = await this.store.getPreparedDeliveryByApproval(owner.id, approvalId);
         if (isExpired(approval)) {
           await this.store.patchApproval(owner.id, approvalId, {
             status: 'expired',
@@ -338,48 +342,52 @@ export class Api {
           });
           return { status: 409, json: { error: 'approval has expired' } };
         }
+        if (['approved', 'rejected', 'denied'].includes(approval.status)) {
+          const terminalStatus = approval.status as Extract<ApprovalStatus, 'approved' | 'rejected' | 'denied'>;
+          const expectedDeliveryStatus = terminalStatus === 'approved' ? 'approved' : 'rejected';
+          if (delivery && decisionStatus === terminalStatus && delivery.status === expectedDeliveryStatus) {
+            const continuation = await continueApprovedTask(this.store, owner.id, approval.taskId, terminalStatus);
+            return this.ok({ approval, task: continuation.task, recovered: true, downstreamContinuation: continuation.pending ? 'pending' : 'complete' });
+          }
+          return { status: 409, json: { error: `approval already in terminal state ${approval.status}` } };
+        }
         const { approval: resolved, error } = resolveApproval({
           approval,
-          status: decision as 'approved' | 'rejected' | 'denied',
+          status: decisionStatus,
           decision: reason || decision,
           decidedBy: owner.id,
         });
         if (error) return { status: 409, json: { error } };
-        await this.store.patchApproval(owner.id, approvalId, {
-          status: resolved.status,
-          decision: resolved.decision,
-          decisionReason: resolved.decisionReason,
-          decidedBy: resolved.decidedBy,
-          decidedAt: resolved.decidedAt,
-        });
-        // Gate 47: approval decisions authorize only their immutable linked delivery.
-        const delivery = await this.store.getPreparedDeliveryByApproval(owner.id, approvalId);
+        let committedApproval = resolved;
         if (delivery) {
-          const next = resolved.status === 'approved' ? 'approved' : 'rejected';
-          const moved = await this.store.transitionPreparedDelivery(owner.id, delivery.id, 'prepared', next);
-          if (!moved) return { status: 409, json: { error: 'prepared delivery state conflict' } };
+          const paired = await this.store.decideApprovalWithPreparedDelivery(owner.id, approvalId, {
+            status: resolved.status,
+            decision: resolved.decision,
+            decisionReason: resolved.decisionReason,
+            decidedBy: resolved.decidedBy,
+            decidedAt: resolved.decidedAt,
+          }, decisionStatus);
+          if (!paired) return { status: 409, json: { error: 'prepared delivery decision conflict' } };
+          committedApproval = paired;
+        } else {
+          committedApproval = await this.store.patchApproval(owner.id, approvalId, {
+            status: resolved.status,
+            decision: resolved.decision,
+            decisionReason: resolved.decisionReason,
+            decidedBy: resolved.decidedBy,
+            decidedAt: resolved.decidedAt,
+          });
         }
-        let task = null;
-        if (approval.taskId) {
-          const current = await this.store.getTask(owner.id, approval.taskId);
-          if (current) {
-            const target = resolved.status === 'approved' ? 'queued' : 'cancelled';
-            const t = transitionTask(current, target);
-            if (t.transitioned) {
-              task = await this.store.patchTask(owner.id, approval.taskId, {
-                status: t.task.status,
-                error: resolved.status === 'approved' ? null : { message: `approval ${resolved.status}` },
-              });
-            }
-          }
-        }
+        // The approval/delivery pair is durable before continuation. A continuation
+        // failure never revokes the owner decision and can be retried idempotently.
+        const continuation = await continueApprovedTask(this.store, owner.id, approval.taskId, decisionStatus);
         await this.store.recordAudit({
           actorType: 'owner', actorId: owner.id, action: `approval.${resolved.status}`,
           projectId: approval.projectId, environmentId: null, resourceType: 'approval', resourceId: approvalId,
           authorizationResult: 'require_approval', correlationId: null, taskId: approval.taskId ?? null,
           metadata: { reason },
         });
-        return this.ok({ approval: resolved, task });
+        return this.ok({ approval: committedApproval, task: continuation.task, downstreamContinuation: continuation.pending ? 'pending' : 'complete' });
       }
 
       // ----- Costs -----
@@ -528,5 +536,29 @@ export class Api {
 
   private ok(json: unknown): HandlerResult {
     return { status: 200, json };
+  }
+}
+
+async function continueApprovedTask(
+  store: Store,
+  ownerId: string,
+  taskId: string | null,
+  approvalStatus: Extract<ApprovalStatus, 'approved' | 'rejected' | 'denied'>,
+): Promise<{ task: Awaited<ReturnType<Store['getTask']>>; pending: boolean }> {
+  if (!taskId) return { task: null, pending: false };
+  try {
+    const current = await store.getTask(ownerId, taskId);
+    if (!current) return { task: null, pending: false };
+    const target = approvalStatus === 'approved' ? 'queued' : 'cancelled';
+    if (current.status === target) return { task: current, pending: false };
+    const transitioned = transitionTask(current, target);
+    if (!transitioned.transitioned) return { task: current, pending: false };
+    const task = await store.patchTask(ownerId, taskId, {
+      status: transitioned.task.status,
+      error: approvalStatus === 'approved' ? null : { message: `approval ${approvalStatus}` },
+    });
+    return { task, pending: false };
+  } catch {
+    return { task: null, pending: true };
   }
 }

@@ -1222,37 +1222,50 @@ export class SupabaseStore implements Store, WorkforceControlAdminPersistence, M
   }
 async linkPreparedDeliveryApproval(ownerId: string, deliveryId: string, approvalId: string) { const rows = await this.q<import('../core/types.js').PreparedDeliveryRecord>(`update public.prepared_deliveries set approval_id=$3, version=version+1, updated_at=now() where owner_id=$1 and id=$2 and approval_id is null returning id, owner_id as "ownerId", project_id as "projectId", task_id as "taskId", agent_id as "agentId", approval_id as "approvalId", message, message_hash as "messageHash", base_commit as "baseCommit", prepared_tree_sha as "preparedTreeSha", manifest, manifest_fingerprint as "manifestFingerprint", workspace_fingerprint as "workspaceFingerprint", verification_session_id as "verificationSessionId", verification_workspace_fingerprint as "verificationWorkspaceFingerprint", status, version, commit_sha as "commitSha", failure_reason as "failureReason", created_at as "createdAt", updated_at as "updatedAt"`, [ownerId, deliveryId, approvalId]); return rows[0] ?? null; }
   async transitionPreparedDelivery(ownerId: string, deliveryId: string, from: import('../core/types.js').PreparedDeliveryStatus, to: import('../core/types.js').PreparedDeliveryStatus, patch: { commitSha?: string | null; failureReason?: string | null } = {}) { const rows = await this.q<import('../core/types.js').PreparedDeliveryRecord>(`update public.prepared_deliveries set status=$4, commit_sha=coalesce($5, commit_sha), failure_reason=coalesce($6, failure_reason), version=version+1, updated_at=now() where owner_id=$1 and id=$2 and status=$3 returning id, owner_id as "ownerId", project_id as "projectId", task_id as "taskId", agent_id as "agentId", approval_id as "approvalId", message, message_hash as "messageHash", base_commit as "baseCommit", prepared_tree_sha as "preparedTreeSha", manifest, manifest_fingerprint as "manifestFingerprint", workspace_fingerprint as "workspaceFingerprint", verification_session_id as "verificationSessionId", verification_workspace_fingerprint as "verificationWorkspaceFingerprint", status, version, commit_sha as "commitSha", failure_reason as "failureReason", created_at as "createdAt", updated_at as "updatedAt"`, [ownerId, deliveryId, from, to, patch.commitSha ?? null, patch.failureReason ?? null]); return rows[0] ?? null; }
-  async decideApprovalWithPreparedDelivery(ownerId: string, approvalId: string, patch: Required<ApprovalPatch>, deliveryStatus: 'approved' | 'rejected'): Promise<ApprovalRecord | null> {
-    const approval = await this.getApproval(ownerId, approvalId);
-    if (!approval) return null;
-    // Gate47 security: must bind to exact linked prepared delivery
-    const delivery = await this.getPreparedDeliveryByApproval(ownerId, approvalId);
-    if (!delivery) return null;
-    if (approval.projectId !== delivery.projectId) return null;
-    if (approval.taskId !== delivery.taskId) return null;
-    if (approval.agentId !== delivery.agentId) return null;
-    if (approval.status !== 'pending') return null;
-    const isApprove = deliveryStatus === 'approved';
+  async decideApprovalWithPreparedDelivery(ownerId: string, approvalId: string, patch: Required<ApprovalPatch>, approvalStatus: Extract<ApprovalRecord['status'], 'approved' | 'rejected' | 'denied'>): Promise<ApprovalRecord | null> {
+    if (!['approved', 'rejected', 'denied'].includes(approvalStatus)) return null;
+    const deliveryStatus = approvalStatus === 'approved' ? 'approved' : 'rejected';
     const client = await this.pool.connect();
     try {
       await client.query('begin');
-      if (isApprove) {
-        const result = await client.query<ApprovalRecord>(`update public.approvals set status=$3, decision=$4, decided_by=$5, decided_at=now() where owner_id=$1 and id=$2 returning *`, [ownerId, approvalId, 'approved', patch.decision, patch.decidedBy ?? ownerId]);
-        if (!result.rowCount) { await client.query('rollback'); return null; }
-        const upd = await client.query(`update public.prepared_deliveries set status=$3, version=version+1, updated_at=now() where owner_id=$1 and id=$2 and status=$4 returning *`, [ownerId, delivery.id, 'approved', 'prepared']);
-        if (!upd.rowCount) { await client.query('rollback'); return null; }
-        await client.query('commit');
-        return result.rows[0]!;
-      } else {
-        const result = await client.query<ApprovalRecord>(`update public.approvals set status=$3, decision=$4, decided_by=$5, decided_at=now() where owner_id=$1 and id=$2 returning *`, [ownerId, approvalId, 'rejected', patch.decision, patch.decidedBy ?? ownerId]);
-        if (!result.rowCount) { await client.query('rollback'); return null; }
-        const upd = await client.query(`update public.prepared_deliveries set status=$3, version=version+1, updated_at=now() where owner_id=$1 and id=$2 and status=$4 returning *`, [ownerId, delivery.id, 'rejected', 'prepared']);
-        if (!upd.rowCount) { await client.query('rollback'); return null; }
-        await client.query('commit');
-        return result.rows[0]!;
+      // Lock and validate both rows in the same transaction. A delivery-linked
+      // decision is valid only for the exact pending/prepared owner-scoped pair.
+      const linked = await client.query<{
+        project_id: string | null;
+        task_id: string | null;
+        agent_id: string | null;
+        approval_status: string;
+        delivery_id: string;
+        delivery_project_id: string;
+        delivery_task_id: string;
+        delivery_agent_id: string;
+        delivery_status: string;
+      }>(`select a.project_id, a.task_id, a.agent_id, a.status as approval_status,
+                 d.id as delivery_id, d.project_id as delivery_project_id,
+                 d.task_id as delivery_task_id, d.agent_id as delivery_agent_id,
+                 d.status as delivery_status
+          from public.approvals a
+          join public.prepared_deliveries d on d.approval_id = a.id and d.owner_id = a.owner_id
+          where a.owner_id = $1 and a.id = $2
+          for update of a, d`, [ownerId, approvalId]);
+      const pair = linked.rows[0];
+      if (!pair || linked.rowCount !== 1 || pair.approval_status !== 'pending' || pair.delivery_status !== 'prepared'
+        || pair.project_id !== pair.delivery_project_id || pair.task_id !== pair.delivery_task_id || pair.agent_id !== pair.delivery_agent_id) {
+        await client.query('rollback');
+        return null;
       }
+      const result = await client.query<ApprovalRecord>(`update public.approvals
+        set status=$3, decision=$4, decision_reason=$5, decided_by=$6, decided_at=$7
+        where owner_id=$1 and id=$2 and status='pending' returning *`, [ownerId, approvalId, approvalStatus, patch.decision, patch.decisionReason, patch.decidedBy, patch.decidedAt]);
+      if (result.rowCount !== 1) { await client.query('rollback'); return null; }
+      const updatedDelivery = await client.query(`update public.prepared_deliveries
+        set status=$4, version=version+1, updated_at=now()
+        where owner_id=$1 and id=$2 and approval_id=$3 and status='prepared' returning id`, [ownerId, pair.delivery_id, approvalId, deliveryStatus]);
+      if (updatedDelivery.rowCount !== 1) { await client.query('rollback'); return null; }
+      await client.query('commit');
+      return toCamel(result.rows[0] as unknown as Record<string, unknown>) as unknown as ApprovalRecord;
     } catch (e) {
-      await client.query('rollback');
+      await client.query('rollback').catch(() => undefined);
       throw e;
     } finally {
       client.release();

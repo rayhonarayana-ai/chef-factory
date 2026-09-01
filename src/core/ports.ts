@@ -335,7 +335,7 @@ export interface Store {
   getApproval(ownerId: string, approvalId: string): Promise<ApprovalRecord | null>;
   listApprovals(ownerId: string, filter?: { projectId?: string; taskId?: string; status?: ApprovalRecord['status'] }): Promise<ApprovalRecord[]>;
   patchApproval(ownerId: string, approvalId: string, patch: ApprovalPatch): Promise<ApprovalRecord>;
-  decideApprovalWithPreparedDelivery(ownerId: string, approvalId: string, patch: Required<ApprovalPatch>, deliveryStatus: 'approved' | 'rejected'): Promise<ApprovalRecord | null>;
+  decideApprovalWithPreparedDelivery(ownerId: string, approvalId: string, patch: Required<ApprovalPatch>, approvalStatus: Extract<ApprovalRecord['status'], 'approved' | 'rejected' | 'denied'>): Promise<ApprovalRecord | null>;
 
   // Gate 47: immutable delivery payloads are prepared once and consumed via CAS.
   createPreparedDelivery(ownerId: string, input: Omit<PreparedDeliveryRecord, 'id' | 'ownerId' | 'approvalId' | 'status' | 'version' | 'commitSha' | 'failureReason' | 'createdAt' | 'updatedAt'>): Promise<PreparedDeliveryRecord>;
