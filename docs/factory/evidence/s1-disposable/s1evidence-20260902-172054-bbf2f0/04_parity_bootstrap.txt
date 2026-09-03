@@ -1,0 +1,53 @@
+================================================================================
+CHEF FACTORY - CONSTITUTION S1 - HOSTED-PRIVILEGE PARITY BOOTSTRAP EVIDENCE (P0-P4)
+================================================================================
+STACK  : OLD_STACK s1evidence-20260902-172054-bbf2f0
+SCOPE  : DISPOSABLE-ONLY test-harness environment bootstrap
+         (NOT an S1 migration; NOT production behavior; destroyed with stack)
+================================================================================
+
+P0 TARGET IDENTITY (revalidated before any GRANT):
+  TARGET_IS_PRODUCTION : NO
+  DB_HOST              : 127.0.0.1
+  DB_PORT              : 55422 (host) -> 5432 (in-container)
+  INSTANCE             : local disposable Supabase CLI stack
+  RUN_ID/STACK_ID      : s1evidence-20260902-172054-bbf2f0
+  POSTGRES_VERSION     : 17.6
+  CONTAINERS           : 12 x supabase_*_s1evidence-20260902-172054-bbf2f0
+                         (DB container 9633598f1e98)
+
+P1 HOSTED PRODUCTION PRIVILEGE REFERENCE (READ-ONLY, catalog-derived)
+  TARGET              : dybyidtcyzgliupzzfhl (production, READ-ONLY)
+  schema USAGE        : public USAGE=true, CREATE=false for anon/authenticated/service_role
+  effective privileges (all 4 S1 tables, identical):
+    anon             : SELECT,INSERT,UPDATE,DELETE,REFERENCES  (no TRUNCATE/TRIGGER)
+    authenticated    : SELECT,INSERT,UPDATE,DELETE,REFERENCES  (no TRUNCATE/TRIGGER)
+    service_role     : SELECT,INSERT,UPDATE,DELETE,REFERENCES,TRUNCATE,TRIGGER
+  S1 revocation semantics PRESERVED in production: TRUNCATE/TRIGGER absent for anon/authenticated.
+
+P2 DIVERGENCE (production vs disposable pre-bootstrap):
+  production: anon/auth SELECT,INSERT,UPDATE,DELETE,REFERENCES ; service_role +TRUNCATE,TRIGGER
+  disposable(pre): anon/auth REFERENCES only ; service_role REFERENCES,TRUNCATE,TRIGGER only
+  EXACT DIFF: disposable was missing SELECT,INSERT,UPDATE,DELETE for anon,
+              authenticated, and service_role on the 4 S1 tables.
+  PRIVILEGE_DIVERGENCE_CONFIRMED : YES
+  (environment parity issue only - disposable CLI did not reproduce hosted
+   Supabase default GRANT ALL ON TABLES bootstrap; NOT an S1 pass/fail signal)
+
+P3 MINIMAL DISPOSABLE-ONLY PARITY BOOTSTRAP (applied to OLD disposable stack):
+  For each of the 4 S1 tables EXACTLY:
+  GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES ON public.<table> TO anon, authenticated, service_role;
+  (12 grantee/table combinations; NO other grants; TRUNCATE/TRIGGER intentionally
+   NOT granted to anon/authenticated; no BYPASSRLS/superuser/ownership/DDL)
+
+P4 POST-BOOTSTRAP PARITY PROOF:
+  Re-derived matrix (all 4 tables, post-bootstrap):
+    anon/authenticated : SELECT,INSERT,UPDATE,DELETE,REFERENCES            (== production)
+    service_role       : SELECT,INSERT,UPDATE,DELETE,REFERENCES,TRUNCATE,TRIGGER (== production)
+  PRIVILEGE_PARITY : EXACT
+  Comparisons checked : 84 (roles x tables x privileges on all 4 tables)
+  Mismatches          : 0
+  Revocation preserved: YES (anon/authenticated still lack TRUNCATE/TRIGGER)
+
+ELEVATED_UNPROVEN_GRANTS : 0
+================================================================================

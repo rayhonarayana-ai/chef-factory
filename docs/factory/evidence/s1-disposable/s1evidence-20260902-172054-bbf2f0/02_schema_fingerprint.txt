@@ -1,0 +1,65 @@
+================================================================================
+CHEF FACTORY - CONSTITUTION S1 - DISPOSABLE STACK EVIDENCE - 02_SCHEMA_FINGERPRINT
+================================================================================
+STACK: OLD_STACK s1evidence-20260902-172054-bbf2f0 (owned by this campaign)
+TARGET_IS_PRODUCTION: NO
+================================================================================
+SCHEMA PARITY vs frozen migration 20260904000000_constitution_registry.sql
+  FROZEN_MIGRATION_SHA-256 : C10D6ED4852E0C3E2110F6A5FAD77DFF920D7AD1561AB87985EF5E98EBBA10A0
+  MATCH                    : YES (recomputed on disposable copy)
+
+TABLES (4): constitution_enforcement_evidence, constitution_governance_events,
+            constitution_runtime_state, constitution_versions
+ALL_4_PRESENT : YES
+
+ROW LEVEL SECURITY (enabled on all 4): YES
+
+POLICIES (8), each table has owner-SELECT using public.is_owner() and
+no-write ALL with USING(false)/WITH CHECK(false) for authenticated:
+  constitution_versions             : ct_versions_select_owner (SELECT), ct_versions_no_write (ALL)
+  constitution_enforcement_evidence : ct_evidence_select_owner (SELECT), ct_evidence_no_write (ALL)
+  constitution_governance_events    : ct_events_select_owner (SELECT),  ct_events_no_write (ALL)
+  constitution_runtime_state        : ct_state_select_owner (SELECT),   ct_state_no_write (ALL)
+POLICY_COUNT : 8
+
+TRIGGERS (14), all present & enabled:
+  constitution_versions             : ct_versions_no_update, ct_versions_no_delete, ct_versions_no_truncate
+  constitution_enforcement_evidence : ct_evidence_no_update, ct_evidence_no_delete, ct_evidence_no_truncate,
+                                      ct_evidence_require_confirmed
+  constitution_governance_events    : ct_events_no_update, ct_events_no_delete, ct_events_no_truncate,
+                                      ct_events_validate
+  constitution_runtime_state        : ct_state_no_delete, ct_state_no_truncate, ct_state_validate
+TRIGGER_COUNT : 14
+
+INDEXES (8): PKs + constitution_versions_lineage_version_idx (unique) +
+             constitution_events_hash_idx, constitution_events_type_idx,
+             constitution_evidence_hash_idx
+  versions_lineage_version_idx unique = YES  (enforces single (constitution_id,version) lineage)
+
+CONSTRAINTS (from frozen migration, verified present):
+  - constitution_hash ~ ^[0-9a-f]{64}$ ; constitution_id = ...000001 (CHECK-locked single registry)
+  - version >= 1 ; payload_path len 1..1024 ; source_commit_sha / git_blob_id sha patterns
+  - evidence_digest ^[0-9a-f]{64}$
+  - event_type in frozen vocabulary; actor_type in (owner, system)
+  - ct_event_epoch_consistency ; ct_event_shape (per-event-type shape rules)
+  - revocation_epoch >= 0 ; singleton_id = 1
+  - FK chains: evidence->versions, events->versions/evidence, runtime_state->versions/events
+  - single registry: constitution_id CHECK-locked to one uuid; lineage unique on (id, version)
+
+RUNTIME STATE (pristine at campaign start):
+  singleton_id=1, active_constitution_hash=NULL, active_activation_event_id=NULL, revocation_epoch=0
+
+ROLE MODEL (matches hosted production convention):
+  anon/authenticated      : bypassrls = NO  (subject to RLS)
+  service_role/postgres   : bypassrls = YES (constitutionRepo/application path)
+  (verified via pg_roles)
+
+== PRIVILEGE PARITY (from reads, post-bootstrap) ==
+  PRIVILEGE_PARITY          : EXACT
+  DISPOSABLE_POST_BOOTSTRAP == HOSTED_PRODUCTION_REFERENCE for every
+  anon/authenticated/service_role SELECT/INSERT/UPDATE/DELETE/REFERENCES/TRUNCATE/TRIGGER
+  on all 4 tables (84 comparisons, 0 mismatch).
+  TRUNCATE/TRIGGER remain revoked from anon/authenticated (S1 revocation preserved).
+
+SCHEMA_PARITY : PASS
+================================================================================

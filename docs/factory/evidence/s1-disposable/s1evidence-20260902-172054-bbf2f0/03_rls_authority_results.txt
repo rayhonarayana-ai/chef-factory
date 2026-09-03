@@ -1,0 +1,71 @@
+================================================================================
+CHEF FACTORY - CONSTITUTION S1 - D5 RLS / AUTHORITY EVIDENCE RESULTS
+================================================================================
+STACK  : OLD_STACK s1evidence-20260902-172054-bbf2f0
+METHOD : real PG sessions; role set via SET ROLE anon/authenticated;
+         JWT identity via transaction-local request.jwt.claim.sub (mirrors
+         Supabase PostgREST request-scoped claims). Service owner semantics via
+         public.is_owner() (security-definer, reads auth.uid() -> .sub).
+PREREQ : hosted-production privilege parity bootstrapped (PRIVILEGE_PARITY=EXACT)
+         so that SQL privileges EXIST and RLS is the real decision layer.
+================================================================================
+
+-- P6 OWNER READ (authenticated, owner => is_owner()=TRUE) ---------------------
+OWNER_SELECT_PRIVILEGE_PRESENT : YES (SELECT on 4/4 tables)
+OWNER_IS_OWNER                 : true
+OWNER_READ_H1_PRESENT          : 1 (constitution version row visible)
+OWNER_READ_THROUGH_RLS         : PROVEN
+
+-- P7 NON-OWNER ISOLATION (authenticated, non-owner => is_owner()=FALSE) -------
+NON_OWNER_SELECT_PRIVILEGE_PRESENT : YES (SELECT on 4/4 tables)
+NON_OWNER_IS_OWNER                 : false
+NON_OWNER_READ_TOTAL_ROWS          : 0 (v=0 e=0 g=0 s=0)  [isolated ground-truth run]
+NON_OWNER_RLS_ISOLATION            : PROVEN
+  (SELECT privilege present; RLS filters to zero rows because is_owner()=false)
+
+-- P8 AUTHENTICATED WRITE DENIALS (owner) - enforcement-layer attribution -------
+INSERT_PRIVILEGE_PRESENT : YES (INSERT granted to authenticated via parity)
+  versions INSERT  : DENIED  LAYER=RLS        (new row violates RLS policy; no-write WITH CHECK false)
+  versions UPDATE  : DENIED  LAYER=RLS        (USING(false) filters row; rows_affected=0)
+  versions DELETE  : DENIED  LAYER=RLS        (USING(false) filters row; rows_affected=0)
+  row preserved    : YES, version unchanged (immutability + RLS upheld)
+  evidence INSERT  : DENIED  LAYER=RLS
+  events INSERT    : DENIED  LAYER=RLS
+  state INSERT     : DENIED  LAYER=RLS
+UPDATE_GUARD   : PASS (0 rows affected; row preserved)
+DELETE_GUARD   : PASS (0 rows affected)
+
+-- P8 ANON WRITE DENIALS (anon, no permissive RLS policy) -----------------------
+ANON INSERT_PRIVILEGE_PRESENT : YES
+  versions INSERT : DENIED  LAYER=RLS   (no permissive policy for anon; privilege present)
+  events INSERT   : DENIED  LAYER=IMMUTABILITY_TRIGGER/CHECK
+                    (ct_events_validate guard rejected ACTIVATED with no matching
+                     evidence binding; RLS default-deny would also apply)
+ANON_WRITE_DENIAL : PASS
+
+-- P9 TRUNCATE / TRIGGER NEGATIVES ----------------------------------------------
+TRUNCATE_PRIVILEGE_PRESENT : NO   (S1 intentionally revoked TRUNCATE from anon/authenticated)
+  TRUNCATE : DENIED  LAYER=PRIVILEGE_LAYER  (permission denied for table)
+TRUNCATE_GUARD : PASS (classified as SQL-PRIVILEGE denial, NOT RLS denial)
+
+-- PRIVILEGE BOUNDARY (post-bootstrap == production reference) ------------------
+  anon/authenticated  : SELECT,INSERT,UPDATE,DELETE,REFERENCES (NO TRUNCATE/TRIGGER)
+  service_role        : SELECT,INSERT,UPDATE,DELETE,REFERENCES,TRUNCATE,TRIGGER
+  postgres            : all
+  PRIVILEGE_BOUNDARY  : EXACT match to hosted production; S1 revocation preserved
+
+-- ENFORCEMENT LAYER ATTRIBUTION SUMMARY ---------------------------------------
+  RLS ................. owner SELECT gate; authenticated/anon INSERT (no-write policy),
+                         UPDATE/DELETE (USING(false) -> 0 rows)
+  IMMUTABILITY_TRIGGER  events INSERT with missing evidence binding (ct_events_validate);
+                         (also UPDATE/DELETE/TRUNCATE blocked triggers on immutable tables)
+  CHECK_CONSTRAINT    - not the rejecting layer in the D5 write-denial set
+  SQL_PRIVILEGE       - TRUNCATE denial for anon/authenticated (revoked privilege)
+ENFORCEMENT_LAYER_ATTRIBUTION : PROVEN
+  (Writes are denied by RLS/policy layer, not by absence of the underlying
+   DML privilege; DML privileges were proven present. Only TRUNCATE is a
+   privilege-layer denial, exactly as production S1 designates.)
+
+-- RESULT -----------------------------------------------------------------------
+D5_RLS_AUTHORITY : PASS
+----------------------------------------------------------------------------------

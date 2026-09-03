@@ -1,0 +1,88 @@
+================================================================================
+CHEF FACTORY - CONSTITUTION S1 - NEW DISPOSABLE STACK ENVIRONMENT (FRESH D6-D11)
+================================================================================
+
+PURPOSE: Re-covered pristine disposable environment for the clean D6-D11 single-pass
+real-repository (PATH B) behavioral proof, after a clean rotation of the initial
+NEW stack that had accumulated harness artifacts.
+
+--------------------------------------------------------------------------------
+STACK IDENTITY (revalidated B0)
+--------------------------------------------------------------------------------
+  RUN_ID / STACK_ID           : s1evidence-20260903-001621-284030 (recreated clean)
+  HOST                        : 127.0.0.1
+  PORT                        : 55442 (db), 55441 (api/kong), 55443 (studio),
+                                55444 (inbucket), 55447 (analytics)
+  DB_NAME                     : postgres
+  DB_USER                     : postgres (disposable-local role)
+  DB_CONTAINER                : supabase_db_s1evidence-20260903-001621-284030
+  DB_VOLUME                   : supabase_db_s1evidence-20260903-001621-284030
+  EDGE_VOLUME                 : supabase_edge_runtime_s1evidence-20260903-001621-284030
+  STORAGE_VOLUME              : supabase_storage_s1evidence-20260903-001621-284030
+  POSTGRES_VERSION            : 17.6 (Docker disposable image)
+  CONTAINER_SET               : 12 x supabase_*_s1evidence-20260903-001621-284030
+  MIGRATION_COUNT             : 18 (applied in order, constitution_registry last)
+  S1_MIGRATION_SHA-256        : C10D6ED4852E0C3E2110F6A5FAD77DFF920D7AD1561AB87985EF5E98EBBA10A0
+
+  TARGET_IS_DISPOSABLE        : YES
+  TARGET_IS_PRODUCTION        : NO (production ref dybyidtcyzgliupzzfhl never contacted)
+
+--------------------------------------------------------------------------------
+CLEAN ROTATION FOR PRISTINE D6 BASELINE
+--------------------------------------------------------------------------------
+  Reason                       : the first NEW-stack harness run aborted mid-sequence
+                                 (invalid non-UUID actor_id in an intermediate harness
+                                 script), leaving one immutable version row (H1) and a
+                                 non-empty registry -> not a fresh D6 baseline.
+  Attribution                  : EXPECTED_DISPOSABLE_TEST_FIXTURE_ACCUMULATION
+                                 (aborted harness artifact, NOT an S1 failure,
+                                 NOT production contamination)
+  Leftover-at-teardown         : constitution_versions=1, evidence=0,
+                                 governance_events=0, runtime singleton pristine
+                                 (active=NULL, epoch=0)
+  Action                       : supabase stop --no-backup; removed 3 campaign volumes;
+                                 supabase start -> all 18 migrations re-applied on a
+                                 brand-new empty volume.
+  Rotated stack pristine check : versions=0, evidence=0, events=0, runtime=1,
+                                 active=NULL, epoch=0  ==> NEW_STACK_FRESH=YES
+
+--------------------------------------------------------------------------------
+DISPOSABLE-ONLY GRANT BOOTSTRAP (matches production-equivalent privileges)
+--------------------------------------------------------------------------------
+  Applied per table (4 x constitution_* tables):
+    GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES
+      ON public.<table> TO anon, authenticated, service_role;
+    GRANT TRUNCATE, TRIGGER ON public.<table> TO service_role;
+  Rationale                     : the local supabase CLI config default does NOT
+                                  auto-expose new tables to role DML; production
+                                  (cloud) does. This is the environment-wide
+                                  privilege divergence root, all tables, not S1-
+                                  specific. Bootstrap restores parity disposable-only.
+  TRUNCATE/TRIGGER on anon/authenticated remain REVOKED (S1 revocation preserved).
+
+  PARITY_CHECK_RESULT           : PRIVILEGE_PARITY=EXACT
+  PARITY_CELLS                   : 84 checks, 0 mismatches
+  REVOCATION_PRESERVED           : anon TRUNCATE=NO, anon TRIGGER=NO,
+                                   service_role TRUNCATE=YES
+
+FAIL-CLOSED MISROUTING GUARD (B1, before any pool open)
+  HOST_IS_LOCALHOST/127.0.0.1   : PASS
+  PORT_IS_DISPOSABLE_55442      : PASS
+  USER_IS_POSTGRES_LOCAL        : PASS
+  HOST_NOT_PRODUCTION (*.supabase.com) : PASS
+  PORT_NOT_5432                 : PASS
+  NO_PROD_REF (dybyidtcyzgliupzzfhl) ANYWHERE : PASS
+  SSL_FALSE_FOR_LOCAL           : PASS
+  GUARD_RESULT                  : PASS
+
+CONNECTION IDENTITY (B3, read-only, before any mutation)
+  dialed host:port              : 127.0.0.1:55442
+  current_database              : postgres
+  current_user                  : postgres
+  server version                : PostgreSQL 17.6 (disposable Docker image)
+  inet_server_addr              : 172.19.0.2 (Docker bridge NAT from 127.0.0.1:55442)
+  CONNECTED_TO_EXPECTED_DISPOSABLE_DB : YES
+
+NOTE: no JWT keys, anon/service_role keys, DB credentials, or connection strings
+are persisted in this evidence. Only descriptive role names are referenced.
+================================================================================

@@ -1,0 +1,50 @@
+================================================================================
+CHEF FACTORY - CONSTITUTION S1 - CONTROLLED DISPOSABLE STACK ROTATION (PHASE C/D)
+================================================================================
+
+PHASE C - OLD (CONTAMINATED) STACK IDENTITY
+  OLD_RUN_ID / OLD_STACK_ID  : s1evidence-20260902-172054-bbf2f0
+  OLD_DB_CONTAINER           : 9633598f1e98 (supabase_db_s1evidence-20260902-172054-bbf2f0)
+  OLD_DB_VOLUME              : supabase_db_s1evidence-20260902-172054-bbf2f0
+  OLD_EDGE_VOLUME            : supabase_edge_runtime_s1evidence-20260902-172054-bbf2f0
+  OLD_STORAGE_VOLUME         : supabase_storage_s1evidence-20260902-172054-bbf2f0
+  OLD_PORTS                  : 55421 (api), 55422 (db), 55423 (studio),
+                               55424 (inbucket), 55427 (analytics)
+  OLD_CONTAINER_SET          : 12 x supabase_*_s1evidence-20260902-172054-bbf2f0
+  OTHER_SUPABASE STACKS      : Qarayti (54321-54327), toctou-disposable,
+                               r11c9-disposable, r11f-disposable,
+                               r11h-r2-disposable, r1b-disposable  ==> NOT TOUCHED
+
+  OLD_STACK_PRISTINE         : NO
+  REASON                     : EXPECTED_DISPOSABLE_TEST_FIXTURE_ACCUMULATION
+                               (append-only immutable S1 tables cannot be
+                                row-cleared; iterative D5 harness seeded
+                                irreversible fixture rows)
+  NOT                        : PRODUCTION_CONTAMINATION
+  NOT automatically          : S1_FAILURE
+
+  ATTRIBUTABLE FIXTURE COUNTS (at teardown):
+    constitution_versions            = 1
+    constitution_enforcement_evidence= 3
+    constitution_governance_events   = 6
+    constitution_runtime_state       = 1
+  RUNTIME STATE still pristine: singleton=1, active_constitution_hash=NULL,
+                                active_activation_event_id=NULL, revocation_epoch=0
+
+PHASE D - DESTROY ONLY OLD DISPOSABLE STACK
+  Ownership revalidated before destruction : YES (all target container/volume
+                                                names carry the OLD_STACK_ID)
+  Attack/ambiguity                         : NONE (exclusive prefix match)
+  DESTRUCTION SCOPE                         : the 12 containers + 3 volumes above
+                                               carrying OLD_STACK_ID ONLY
+  No backup.
+  OLD_SYNTHETIC_STATE_DESTROYED             : YES (expected after volume removal)
+  UNRELATED_ENVIRONMENT_TOUCHED             : NO
+
+  Post-teardown reverify:
+    OLD_STACK_DESTROYED        : YES
+    OLD_VOLUME_REMOVED         : YES
+    D5_EVIDENCE_SURVIVED_OLD_STACK_TEARDOWN : YES (evidence lives outside the
+                                               disposable DB lifecycle; hashes
+                                               reverified, see SHA256SUMS.txt)
+================================================================================

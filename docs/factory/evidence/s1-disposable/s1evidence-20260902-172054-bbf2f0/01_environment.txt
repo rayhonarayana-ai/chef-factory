@@ -1,0 +1,40 @@
+================================================================================
+CHEF FACTORY - CONSTITUTION S1 - DISPOSABLE STACK EVIDENCE - 01_ENVIRONMENT
+================================================================================
+CAMPAIGN: S1 Durable Behavioral Evidence (two-stack rotation)
+STACK KIND: OLD_STACK (P0-P4 parity + D5 RLS/authority evidence)
+
+RUN_ID / STACK_ID      : s1evidence-20260902-172054-bbf2f0
+TARGET                 : disposable local Supabase CLI stack
+TARGET_IS_PRODUCTION   : NO
+DB_HOST                : 127.0.0.1
+DB_PORT (host)         : 55422
+DB_CONTAINER_PORT      : 5432 (in-container)
+DATABASE               : postgres
+POSTGRES_VERSION       : 17.6
+POSTGRES_IMAGE         : public.ecr.aws/supabase/postgres:17.6.1.158
+DB_CONTAINER_ID        : 9633598f1e98
+API_PORT               : 55421
+STUDIO_PORT            : 55423
+INBUCKET_PORT          : 55424
+ANALYTICS_PORT         : 55427
+
+FROZEN S1 MIGRATION SHA-256:
+  MIGRATION = supabase/migrations/20260904000000_constitution_registry.sql
+  SHA-256   = C10D6ED4852E0C3E2110F6A5FAD77DFF920D7AD1561AB87985EF5E98EBBA10A0
+  MATCH     = YES (recomputed on disposable copy)
+
+AUTHORIZED PARITY BOOTSTRAP (disposable-only, step P0-P4):
+  HOSTED_PRIVILEGE_MATRIX_CAPTURED          : YES
+  DISPOSABLE_PRE_BOOTSTRAP_MATRIX_CAPTURED  : YES
+  PRIVILEGE_DIVERGENCE_CONFIRMED            : YES
+  PARITY_BOOTSTRAP_SCOPE                    : DISPOSABLE_ONLY
+  ELEVATED_UNPROVEN_GRANTS                  : 0
+  PRIVILEGE_PARITY                          : EXACT
+  PRODUCTION_PRIVILEGE_WRITES               : 0
+
+D5 EVIDENCE CAPTURE on this stack: COMPLETE (see 03_rls_authority_results.txt)
+================================================================================
+NOTE: No credentials, JWTs, service-role keys, API keys, or customers are
+represented in this file.
+================================================================================

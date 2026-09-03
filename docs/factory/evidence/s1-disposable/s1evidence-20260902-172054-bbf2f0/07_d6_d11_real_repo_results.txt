@@ -1,0 +1,150 @@
+================================================================================
+CHEF FACTORY - CONSTITUTION S1 - D6-D11 REAL-REPOSITORY DISPOSABLE EVIDENCE
+(PATH B: injected pg.Pool into the real ConstitutionRepo)
+================================================================================
+
+METHOD (PATH B - authorized)
+  Mechanism      : constructor dependency-injection seam
+                   new ConstitutionRepo(customPool)
+                   in src/db/constitutionRepo.ts (constructor: pool = getPool())
+  Custom pool    : process-local pg.Pool -> 127.0.0.1:55442 (postgres/postgres,
+                   database postgres, ssl=false). NOT getPool()/getFactoryConfig(),
+                   NOT FACTORY_ENV_FILE, NOT production pooler, NOT production ref,
+                   no persistent env, no source change, no production live tests.
+  REAL_CONSTITUTION_REPO_INSTANCE : YES (the actual production persistence class)
+  TEMP_HARNESS   : s1_d611_harness.ts at repo root, untracked, removed after (B15)
+  Fixtures       : H1 = a8f8b3800659eca75bfab390c023a87942b5ee50f5925790de91fd28c38ab46e
+                   H2 = bbbb...(64 hex)   (both valid 64-lowercase-hex)
+                   OWNER actor = aaaaaaaa-.... ; SYSTEM actor = bbbbbb...
+                   (synthetic UUIDs, no real identities)
+
+================================================================================
+APPEND-ONLY SINGLE-PASS PLAN (B6 - precomputed, no resets, no deletes)
+================================================================================
+Single immutable registry (constitution_id CHECK-locked to the fixed lineage UUID;
+unique lineage (constitution_id,version); append-only block triggers on all rows).
+One deterministic forward progression:
+
+  D6  negatives on empty registry        -> all fail, 0 durable side-effects
+  D7  H1: bootstrap v1 -> confirm -> evidence -> activate (atomic)
+      + H2 setup + induced rollbacks (evidence_mismatch, CAS mismatch) = 0 partial
+      + append-only immutability (engine block triggers)
+  D8  H2 confirmed/evidenced; two INDEPENDENT sessions race activateConstitution(H2,
+      expectedPrev=H1) under advisory lock 74740 -> exactly-one-winner
+  D9  securityRevoke on active=H2 (MODEL B) -> epoch N->N+1, pointer+activation
+      id retained, no grandfathering
+  D10 rollbackToVersion(H1, expectedPrev=H2) -> transition to DIFFERENT version H1
+  D11 same-hash reauthorization boundary (already_active) + no_evidence/conflict
+      boundaries; S4_REAUTHORIZATION_CEREMONY_REQUIRED=YES (NOT implemented)
+
+  D6_D11_APPEND_ONLY_PLAN = VALID
+
+================================================================================
+D6 - NEGATIVE INVARIANTS / PREREQUISITES (NEGATIVE_PARTIAL_STATE=ZERO)
+================================================================================
+  [D6] start-fresh (v0 e0 g0 s0 epoch0)           : PASS
+  [D6] confirm-before-version -> version_not_found: PASS
+  [D6] evidence-before-version -> version_not_found: PASS
+  [D6] activate-before-version -> version_not_found: PASS
+  [D6] revoke-with-no-active -> no_active_constitution: PASS
+  [D6] confirm-requires-owner (system actor throws): PASS
+  [D6] non-governance-actor-rejected (model throws): PASS
+  [D6] malformed-hash-rejected (throws)           : PASS
+  [D6] CHECK-ENGINE-rejects-invalid-event-type    : PASS (ct_event_shape CHECK)
+  [D6] TRIGGER-rejects-unconfirmed-evidence       : PASS (ct_evidence_require_confirmed)
+  [D6] CHECK-rejects-non-lowercase-hash           : PASS (constitution_hash CHECK)
+  [D6] NEGATIVE_PARTIAL_STATE=ZERO                : PASS (v0 e0 g0 epoch0 after all)
+  D6_NEGATIVE_INVARIANTS = PASS
+
+================================================================================
+D7 - REAL-REPOSITORY ATOMICITY (EVENT_STATE_ATOMICITY, PARTIAL_DURABLE_STATE=ZERO)
+================================================================================
+  [D7] bootstrap-H1 -> recorded                    : PASS
+  [D7] confirm-H1 -> confirmed                     : PASS
+  [D7] evidence-H1 -> recorded                     : PASS
+  [D7] activate-H1 -> activated (event+state commit together): PASS
+  [D7] EVENT_STATE_ATOMICITY (commit together)     : PASS (active=H1, epoch=0)
+  [D7] bootstrap/confirm/evidence-H2 (setup)       : PASS
+  [D7] induced rollback #1 (evidence_mismatch)     : PASS (0 partial events)
+  [D7] induced rollback #2 (expected_active_mismatch/CAS): PASS (0 partial events)
+  [D7] PARTIAL_DURABLE_STATE=ZERO                  : PASS
+  [D7] append-only immutability (engine block triggers):
+       VERSION-UPDATE-BLOCKED  : PASS
+       VERSION-DELETE-BLOCKED  : PASS
+       VERSION-TRUNCATE-BLOCKED: PASS
+       EVENT-UPDATE-BLOCKED    : PASS
+       STATE-DELETE-BLOCKED    : PASS
+  D7_REAL_REPOSITORY_ATOMICITY = PASS
+
+================================================================================
+D8 - REAL CONCURRENCY (independent sessions + advisory lock 74740)
+================================================================================
+  Two independent pg.Pool instances -> same disposable DB, verified distinct
+  pg_backend_pid() (e.g. pids 372 vs 373). Race activateConstitution(H2, ev2,
+  expectedPrev=H1) concurrently via Promise.all.
+  [D8] REAL_INDEPENDENT_SESSIONS                  : PASS (distinct pids)
+  [D8] EXACTLY_ONE_WINNER                          : PASS ([already_active, activated])
+  [D8] one-superseded-one-activated                : PASS (S=1 A=1)
+  [D8] LOST_EVENTS=ZERO                            : PASS (+2 events total)
+  [D8] STATE_EVENT_DIVERGENCE=ZERO                 : PASS (active=H2)
+  [D8] ADVISORY_SERIALIZATION                      : PASS (all write paths call
+                                                        pg_advisory_xact_lock(74740,1))
+  D8_REAL_CONCURRENCY = PASS
+
+================================================================================
+D9 - SECURITY_REVOKE MODEL B (retained pointer, N->N+1, no grandfathering)
+================================================================================
+  Pre-revoke: active H = H2, activation event A = H2 ACTIVATED event id, epoch N=0.
+  [D9] revoke-success -> revoked                   : PASS
+  [D9] activeConstitutionHash RETAINED = H         : PASS
+  [D9] activeActivationEventId RETAINED = A        : PASS
+  [D9] revocationEpoch = N+1                       : PASS (0 -> 1)
+  [D9] event.previousActiveHash = H                : PASS
+  [D9] event.newActiveHash = NULL                  : PASS
+  [D9] event.epochBefore = N                       : PASS
+  [D9] event.epochAfter = N+1                      : PASS
+  [D9] event-type = SECURITY_REVOKED               : PASS
+  [D9] NO_AUTOMATIC_GRANDFATHERING                 : PASS (0 post-revoke transitions)
+  D9_SECURITY_REVOKED_MODEL_B = PASS (no contradiction -> no stop/repair)
+
+================================================================================
+D10 - REPLACEMENT VERSION TRANSITION (different-version via existing semantics)
+================================================================================
+  rollbackToVersion(H1, evidence-ev1, expectedPrev=H2) while active=H2, epoch=1.
+  [D10] rollback-to-H1 (different version from active) -> rolled_back : PASS
+  [D10] active-now-H1                                : PASS
+  [D10] REPLACEMENT_VERSION_TRANSITION=PROVEN        : PROVEN
+  D10_REPLACEMENT_VERSION = PROVEN (no S1 modification required)
+
+================================================================================
+D11 - SAME-HASH REAUTHORIZATION BOUNDARY (S4 REQUIRED, NOT implemented)
+================================================================================
+  Active=H1 (after D10), same evidence ev1 bound.
+  [D11] same-hash-same-evidence -> already_active    : PASS
+  [D11] SAME_HASH_REAUTHORIZATION_OBSERVATION=CONFIRMED: CONFIRMED (boundary =
+        already_active; no new event, no rewrite/re-ceremony)
+  [D11] no-new-event-written                         : PASS
+  [D11] non-existent-evidence boundary -> no_enforcement_evidence : PASS
+  [D11] alt-evidence recorded (setup)                : PASS
+  [D11] different-evidence same-hash -> conflict     : PASS
+  A same-hash re-activation is acknowledged as already-active/conflict, NOT a fresh
+  reauthorization. S4_REAUTHORIZATION_CEREMONY_REQUIRED = YES. S4 NOT implemented.
+
+================================================================================
+FINAL DURABLE SYNTHETIC STATE
+================================================================================
+  constitution_versions             = 2   (H1 v1, H2 v2)
+  constitution_enforcement_evidence = 3   (H1, H2, +alt H1 for D11 conflict probe)
+  constitution_governance_events    = 11
+  runtime_state                     = 1 (active_constitution_hash=H1,
+                                         active_activation_event_id=10,
+                                         revocation_epoch=1)
+  All append-only; zero rows deleted/updated/truncated.
+
+CONNECTIONS CLOSED (B14): OPEN_CAMPAIGN_DB_CONNECTIONS = 0
+  (only the internal supabase pg_net worker + this-check connection remain, none
+   are campaign connections)
+TEMP_HARNESS_REMOVED (B15): YES (s1_d611_harness.ts removed after run)
+SOURCE_FILES_MODIFIED: 0
+PRODUCTION_WRITES: 0
+================================================================================

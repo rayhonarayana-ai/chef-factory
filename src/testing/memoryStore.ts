@@ -20,11 +20,31 @@ import { toLockdownRecord, canReleaseLockdown } from '../core/security/lockdown.
 import type { WorkforceControlRecord } from '../core/security/workforceControl.js';
 import { missionCanTransition, hashMissionPlan } from '../core/mission/missionEngine.js';
 import { aggregateModelHealth, DEFAULT_HEALTH_POLICY } from '../core/modelHealth.js';
+import type { ConstitutionReadStore, ConstitutionAdminPersistence } from '../core/constitution/ports.js';
+import type {
+  ConstitutionActivateResult,
+  ConstitutionBootstrapResult,
+  ConstitutionConfirmResult,
+  ConstitutionEnforcementEvidenceRecord,
+  ConstitutionEvidenceInput,
+  ConstitutionEvidenceResult,
+  ConstitutionGovernanceEventRecord,
+  ConstitutionRevokeResult,
+  ConstitutionRuntimeStateRecord,
+  ConstitutionVersionInput,
+  ConstitutionVersionRecord,
+} from '../core/constitution/types.js';
+import {
+  assertConstitutionHashFormat,
+  assertGovernanceActor,
+  COMMIT_OR_BLOB_RE,
+  CONSTITUTION_LINEAGE_ID,
+} from '../core/constitution/types.js';
 
 const uuid = (): string => crypto.randomUUID();
 const now = (): string => new Date().toISOString();
 
-export class MemoryStore implements Store, WorkforceControlAdminPersistence, ModelHealthPersistence {
+export class MemoryStore implements Store, WorkforceControlAdminPersistence, ModelHealthPersistence, ConstitutionReadStore, ConstitutionAdminPersistence {
   projects: ProjectRecord[] = [];
   passports: PassportRecord[] = [];
   tasks: TaskRecord[] = [];
@@ -54,6 +74,17 @@ export class MemoryStore implements Store, WorkforceControlAdminPersistence, Mod
     globallyEnabled: true,
     reason: 'initial state — global workforce enabled',
     updatedBy: 'system',
+    updatedAt: now(),
+  };
+  constitutionVersions: ConstitutionVersionRecord[] = [];
+  constitutionGovernanceEvents: ConstitutionGovernanceEventRecord[] = [];
+  constitutionEvidence: ConstitutionEnforcementEvidenceRecord[] = [];
+  constitutionRuntimeState: ConstitutionRuntimeStateRecord = {
+    singletonId: 1,
+    activeConstitutionHash: null,
+    activeActivationEventId: null,
+    revocationEpoch: 0,
+    createdAt: now(),
     updatedAt: now(),
   };
 
@@ -937,5 +968,325 @@ async transitionPreparedDelivery(ownerId: string, deliveryId: string, from: impo
       }
     }
     return count;
+  }
+
+  // ————— Constitution — READ (ConstitutionReadStore) —————
+  async getVersionByHash(constitutionHash: string): Promise<ConstitutionVersionRecord | null> {
+    return this.constitutionVersions.find((v) => v.constitutionHash === constitutionHash) ?? null;
+  }
+  async listVersions(): Promise<ConstitutionVersionRecord[]> {
+    return [...this.constitutionVersions].sort((a, b) => a.version - b.version);
+  }
+  async getGovernanceEvent(eventId: number): Promise<ConstitutionGovernanceEventRecord | null> {
+    const e = this.constitutionGovernanceEvents.find((x) => x.eventId === eventId) ?? null;
+    return e ? { ...e, metadata: { ...e.metadata } } : null;
+  }
+  async listGovernanceEvents(): Promise<ConstitutionGovernanceEventRecord[]> {
+    return [...this.constitutionGovernanceEvents]
+      .sort((a, b) => a.eventId - b.eventId)
+      .map((e) => ({ ...e, metadata: { ...e.metadata } }));
+  }
+  async getEvidence(evidenceId: string): Promise<ConstitutionEnforcementEvidenceRecord | null> {
+    return this.constitutionEvidence.find((e) => e.evidenceId === evidenceId) ?? null;
+  }
+  async listEvidenceByHash(constitutionHash: string): Promise<ConstitutionEnforcementEvidenceRecord[]> {
+    return this.constitutionEvidence
+      .filter((e) => e.constitutionHash === constitutionHash)
+      .sort((a, b) => a.recordedAt.localeCompare(b.recordedAt));
+  }
+  async getRuntimeState(): Promise<ConstitutionRuntimeStateRecord | null> {
+    return { ...this.constitutionRuntimeState };
+  }
+  async isHashConfirmed(constitutionHash: string): Promise<boolean> {
+    return this.constitutionGovernanceEvents.some(
+      (e) => e.constitutionHash === constitutionHash && e.eventType === 'SYSTEM_RATIFICATION_CONFIRMED',
+    );
+  }
+  async hasEnforcementEvidence(constitutionHash: string): Promise<boolean> {
+    return this.constitutionEvidence.some((e) => e.constitutionHash === constitutionHash);
+  }
+
+  // ————— Constitution — WRITE (ConstitutionAdminPersistence) —————
+  // Transition semantics mirror the Postgres implementation exactly (same
+  // preconditions, same outcome vocabulary, same idempotency, same atomicity).
+  async bootstrapRecordVersion(input: ConstitutionVersionInput): Promise<ConstitutionBootstrapResult> {
+    assertConstitutionHashFormat(input.constitutionHash);
+    if (!Number.isInteger(input.version) || input.version < 1) {
+      throw new Error('version must be an integer >= 1');
+    }
+    if (!input.payloadPath || input.payloadPath.length < 1 || input.payloadPath.length > 1024) {
+      throw new Error('payloadPath must be between 1 and 1024 characters');
+    }
+    if (input.sourceCommitSha != null && !COMMIT_OR_BLOB_RE.test(input.sourceCommitSha)) {
+      throw new Error('sourceCommitSha must match a commit/blob hex identity');
+    }
+    if (input.gitBlobId != null && !COMMIT_OR_BLOB_RE.test(input.gitBlobId)) {
+      throw new Error('gitBlobId must match a commit/blob hex identity');
+    }
+    const existing = await this.getVersionByHash(input.constitutionHash);
+    if (existing) {
+      return { ok: true, outcome: 'already_exists', version: existing };
+    }
+    const version: ConstitutionVersionRecord = {
+      constitutionHash: input.constitutionHash,
+      constitutionId: CONSTITUTION_LINEAGE_ID,
+      version: input.version,
+      payloadPath: input.payloadPath,
+      sourceCommitSha: input.sourceCommitSha ?? null,
+      gitBlobId: input.gitBlobId ?? null,
+      createdAt: now(),
+    };
+    this.constitutionVersions.push(version);
+    return { ok: true, outcome: 'recorded', version };
+  }
+
+  async confirmSystemRatification(input: {
+    actorId: string;
+    actorType: ConstitutionGovernanceEventRecord['actorType'];
+    constitutionHash: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<ConstitutionConfirmResult> {
+    assertConstitutionHashFormat(input.constitutionHash);
+    assertGovernanceActor(input.actorType);
+    if (input.actorType !== 'owner') {
+      throw new Error('system ratification confirmation requires an owner actor');
+    }
+    if (!(await this.getVersionByHash(input.constitutionHash))) {
+      return { ok: false, outcome: 'version_not_found', event: null };
+    }
+    const existing = this.constitutionGovernanceEvents.find(
+      (e) => e.constitutionHash === input.constitutionHash && e.eventType === 'SYSTEM_RATIFICATION_CONFIRMED',
+    );
+    if (existing) {
+      return { ok: true, outcome: 'already_confirmed', event: existing };
+    }
+    const event: ConstitutionGovernanceEventRecord = {
+      eventId: this.constitutionGovernanceEvents.length + 1,
+      constitutionHash: input.constitutionHash,
+      eventType: 'SYSTEM_RATIFICATION_CONFIRMED',
+      actorType: input.actorType,
+      actorId: input.actorId,
+      occurredAt: now(),
+      previousActiveHash: null,
+      newActiveHash: null,
+      evidenceId: null,
+      revocationEpochBefore: 0,
+      revocationEpochAfter: 0,
+      metadata: input.metadata ?? {},
+    };
+    this.constitutionGovernanceEvents.push(event);
+    return { ok: true, outcome: 'confirmed', event };
+  }
+
+  async recordEnforcementReady(input: {
+    actorId: string;
+    actorType: ConstitutionGovernanceEventRecord['actorType'];
+    evidence: ConstitutionEvidenceInput;
+  }): Promise<ConstitutionEvidenceResult> {
+    const ev = input.evidence;
+    assertConstitutionHashFormat(ev.constitutionHash);
+    assertConstitutionHashFormat(ev.evidenceDigest, 'evidenceDigest');
+    assertGovernanceActor(input.actorType);
+    if (input.actorType !== 'system') {
+      throw new Error('enforcement-ready recording requires a trusted system actor');
+    }
+    if (!ev.runtimeArtifactIdentity || ev.runtimeArtifactIdentity.length === 0) {
+      throw new Error('runtimeArtifactIdentity is required');
+    }
+    if (!(await this.getVersionByHash(ev.constitutionHash))) {
+      return { ok: false, outcome: 'version_not_found', evidence: null, event: null };
+    }
+    if (!(await this.isHashConfirmed(ev.constitutionHash))) {
+      return { ok: false, outcome: 'not_confirmed', evidence: null, event: null };
+    }
+    const dup = this.constitutionEvidence.find(
+      (e) =>
+        e.constitutionHash === ev.constitutionHash &&
+        e.evidenceDigest === ev.evidenceDigest &&
+        e.verificationSuite === ev.verificationSuite &&
+        e.verificationSuiteVersion === ev.verificationSuiteVersion &&
+        e.runtimeArtifactIdentity === ev.runtimeArtifactIdentity,
+    );
+    if (dup) {
+      return { ok: true, outcome: 'already_recorded', evidence: dup, event: null };
+    }
+    const evidence: ConstitutionEnforcementEvidenceRecord = {
+      evidenceId: uuid(),
+      constitutionHash: ev.constitutionHash,
+      runtimeArtifactIdentity: ev.runtimeArtifactIdentity,
+      runtimeCodeCommitSha: ev.runtimeCodeCommitSha ?? null,
+      buildProvenance: ev.buildProvenance ?? null,
+      verificationSuite: ev.verificationSuite,
+      verificationSuiteVersion: ev.verificationSuiteVersion,
+      evidenceDigest: ev.evidenceDigest,
+      recordedAt: now(),
+    };
+    this.constitutionEvidence.push(evidence);
+    const event: ConstitutionGovernanceEventRecord = {
+      eventId: this.constitutionGovernanceEvents.length + 1,
+      constitutionHash: ev.constitutionHash,
+      eventType: 'ENFORCEMENT_READY_RECORDED',
+      actorType: input.actorType,
+      actorId: input.actorId,
+      occurredAt: now(),
+      previousActiveHash: null,
+      newActiveHash: null,
+      evidenceId: evidence.evidenceId,
+      revocationEpochBefore: 0,
+      revocationEpochAfter: 0,
+      metadata: {},
+    };
+    this.constitutionGovernanceEvents.push(event);
+    return { ok: true, outcome: 'recorded', evidence, event };
+  }
+
+  async activateConstitution(input: {
+    actorId: string;
+    actorType: ConstitutionGovernanceEventRecord['actorType'];
+    constitutionHash: string;
+    evidenceId: string;
+    expectedPreviousActiveHash: string | null;
+    metadata?: Record<string, unknown>;
+  }): Promise<ConstitutionActivateResult> {
+    return this.transition({ ...input, eventType: 'ACTIVATED' });
+  }
+
+  async rollbackToVersion(input: {
+    actorId: string;
+    actorType: ConstitutionGovernanceEventRecord['actorType'];
+    constitutionHash: string;
+    evidenceId: string;
+    expectedPreviousActiveHash: string | null;
+    metadata?: Record<string, unknown>;
+  }): Promise<ConstitutionActivateResult> {
+    return this.transition({ ...input, eventType: 'ROLLED_BACK_TO_VERSION' });
+  }
+
+  private async transition(input: {
+    actorId: string;
+    actorType: ConstitutionGovernanceEventRecord['actorType'];
+    constitutionHash: string;
+    evidenceId: string;
+    expectedPreviousActiveHash: string | null;
+    metadata?: Record<string, unknown>;
+    eventType: 'ACTIVATED' | 'ROLLED_BACK_TO_VERSION';
+  }): Promise<ConstitutionActivateResult> {
+    assertConstitutionHashFormat(input.constitutionHash, 'constitutionHash');
+    if (input.expectedPreviousActiveHash != null) {
+      assertConstitutionHashFormat(input.expectedPreviousActiveHash, 'expectedPreviousActiveHash');
+    }
+    assertGovernanceActor(input.actorType);
+    if (input.actorType !== 'owner') {
+      throw new Error('constitution activation/rollback requires an owner actor');
+    }
+    if (!(await this.getVersionByHash(input.constitutionHash))) {
+      return { ok: false, outcome: 'version_not_found', event: null, supersededEvent: null, state: null };
+    }
+    if (!(await this.isHashConfirmed(input.constitutionHash))) {
+      return { ok: false, outcome: 'not_confirmed', event: null, supersededEvent: null, state: null };
+    }
+    const evidence = await this.getEvidence(input.evidenceId);
+    if (!evidence) {
+      return { ok: false, outcome: 'no_enforcement_evidence', event: null, supersededEvent: null, state: null };
+    }
+    if (evidence.constitutionHash !== input.constitutionHash) {
+      return { ok: false, outcome: 'evidence_mismatch', event: null, supersededEvent: null, state: null };
+    }
+
+    const state = this.constitutionRuntimeState;
+    const current = state.activeConstitutionHash;
+    if (current === input.constitutionHash) {
+      const actEvent = state.activeActivationEventId != null
+        ? this.constitutionGovernanceEvents.find((e) => e.eventId === state.activeActivationEventId) ?? null
+        : null;
+      const boundSameEvidence = actEvent != null && actEvent.evidenceId === input.evidenceId;
+      if (boundSameEvidence) {
+        return { ok: true, outcome: 'already_active', event: actEvent, supersededEvent: null, state: { ...state } };
+      }
+      return { ok: false, outcome: 'conflict', event: null, supersededEvent: null, state: { ...state } };
+    }
+    if (current !== input.expectedPreviousActiveHash) {
+      return { ok: false, outcome: 'expected_active_mismatch', event: null, supersededEvent: null, state: { ...state } };
+    }
+
+    const baseEvent = {
+      actorType: input.actorType,
+      actorId: input.actorId,
+      occurredAt: now(),
+      revocationEpochBefore: state.revocationEpoch,
+      revocationEpochAfter: state.revocationEpoch,
+      metadata: input.metadata ?? {},
+    };
+
+    let supersededEvent: ConstitutionGovernanceEventRecord | null = null;
+    if (current != null) {
+      supersededEvent = {
+        eventId: this.constitutionGovernanceEvents.length + 1,
+        constitutionHash: input.constitutionHash,
+        eventType: 'SUPERSEDED',
+        previousActiveHash: current,
+        newActiveHash: input.constitutionHash,
+        evidenceId: null,
+        ...baseEvent,
+      };
+      this.constitutionGovernanceEvents.push(supersededEvent);
+    }
+
+    const event: ConstitutionGovernanceEventRecord = {
+      eventId: this.constitutionGovernanceEvents.length + 1,
+      constitutionHash: input.constitutionHash,
+      eventType: input.eventType,
+      previousActiveHash: current,
+      newActiveHash: input.constitutionHash,
+      evidenceId: input.evidenceId,
+      ...baseEvent,
+    };
+    this.constitutionGovernanceEvents.push(event);
+
+    state.activeConstitutionHash = input.constitutionHash;
+    state.activeActivationEventId = event.eventId;
+    state.updatedAt = now();
+    return {
+      ok: true,
+      outcome: input.eventType === 'ACTIVATED' ? 'activated' : 'rolled_back',
+      event,
+      supersededEvent,
+      state: { ...state },
+    };
+  }
+
+  async securityRevoke(input: {
+    actorId: string;
+    actorType: ConstitutionGovernanceEventRecord['actorType'];
+    justification: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<ConstitutionRevokeResult> {
+    assertGovernanceActor(input.actorType);
+    if (!input.justification || input.justification.trim().length === 0) {
+      throw new Error('security revocation requires a justification');
+    }
+    const state = this.constitutionRuntimeState;
+    if (state.activeConstitutionHash == null) {
+      return { ok: false, outcome: 'no_active_constitution', event: null, state: { ...state } };
+    }
+    const current = state.activeConstitutionHash;
+    const event: ConstitutionGovernanceEventRecord = {
+      eventId: this.constitutionGovernanceEvents.length + 1,
+      constitutionHash: current,
+      eventType: 'SECURITY_REVOKED',
+      actorType: input.actorType,
+      actorId: input.actorId,
+      occurredAt: now(),
+      previousActiveHash: current,
+      newActiveHash: null,
+      evidenceId: null,
+      revocationEpochBefore: state.revocationEpoch,
+      revocationEpochAfter: state.revocationEpoch + 1,
+      metadata: { ...(input.metadata ?? {}), justification: input.justification },
+    };
+    this.constitutionGovernanceEvents.push(event);
+    state.revocationEpoch = state.revocationEpoch + 1;
+    state.updatedAt = now();
+    return { ok: true, outcome: 'revoked', event, state: { ...state } };
   }
 }
